@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -30,12 +31,12 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_split(dataset_name: str, dataset_config: str | None, split: str, streaming: bool):
+def load_split(dataset_name: str, dataset_config: str | None, split: str, streaming: bool, token: str | None):
     try:
-        return load_dataset(dataset_name, dataset_config, split=split, streaming=streaming)
+        return load_dataset(dataset_name, dataset_config, split=split, streaming=streaming, token=token)
     except Exception:
         if dataset_config and dataset_config != "SFT":
-            return load_dataset(dataset_name, "SFT", split=split, streaming=streaming)
+            return load_dataset(dataset_name, "SFT", split=split, streaming=streaming, token=token)
         raise
 
 
@@ -79,9 +80,10 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     tokenizer = load_tokenizer(args.model_name)
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
 
     datasets = {
-        split: iter(load_split(args.dataset_name, args.dataset_config, split, args.streaming))
+        split: iter(load_split(args.dataset_name, args.dataset_config, split, args.streaming, hf_token))
         for split in args.splits
     }
 
