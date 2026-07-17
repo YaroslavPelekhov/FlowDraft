@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orthrus-training-reconstruction"
+version = "0.1.0"
+description = "Reconstructed Orthrus training pipeline for Qwen3-1.7B."
+requires-python = ">=3.10"
+dependencies = [
+    "accelerate>=1.8.0",
+    "datasets>=3.6.0",
+    "huggingface-hub>=0.33.0",
+    "numpy>=1.26.0",
+    "pyyaml>=6.0.2",
+    "safetensors>=0.5.3",
+    "torch>=2.6.0",
+    "tqdm>=4.66.0",
+    "transformers>=5.8.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["orthrus_training*"]
