@@ -3,10 +3,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import sys
+import tempfile
 import time
 from pathlib import Path
+
+default_tmp = Path(os.environ.get("TMPDIR", "/dev/shm/flowdraft_tmp"))
+default_tmp.mkdir(parents=True, exist_ok=True)
+os.environ["TMPDIR"] = str(default_tmp)
+tempfile.tempdir = str(default_tmp)
 
 import torch
 import torch.nn.functional as F
