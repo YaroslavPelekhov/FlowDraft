@@ -139,7 +139,9 @@ Defaults:
 - `MAX_STEPS=600`
 - `block_size=32`
 - `FLOW_STATE_MIN=0.0`, `FLOW_STATE_MAX=0.0` for one-jump drafting from the masked prior
-- `FLOW_STEPS="1 2"` for one-jump and two-jump drafting benchmarks
+- `HARD_CE_WEIGHT=0.5` to bias the endpoint drafter toward greedy top-1 agreement
+- `CONSISTENCY_WEIGHT=0.0` in the default quick run; enable it only after the CE baseline is healthy
+- `FLOW_STEPS="1"` for the primary one-jump benchmark
 - only `best/` and `last/` checkpoints are kept
 
 Compare against the Orthrus quick baseline:
@@ -147,7 +149,6 @@ Compare against the Orthrus quick baseline:
 ```bash
 cat /dev/shm/flowdraft_runs/orthrus_quick2h/benchmark_best_summary.json
 cat /dev/shm/flowdraft_runs/flowdraft_quick2h/benchmark_best_flow1_summary.json
-cat /dev/shm/flowdraft_runs/flowdraft_quick2h/benchmark_best_flow2_summary.json
 ```
 
 The main numbers are `mean_speedup`, `mean_flowdraft_tpf`, `mean_acceptance`, and `parity_rate`. A useful first success criterion is FlowDraft `flow_steps=1` beating the Orthrus quick baseline's TPF/speedup without reducing parity.

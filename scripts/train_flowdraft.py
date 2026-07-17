@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import get_cosine_schedule_with_warmup, set_seed
@@ -56,6 +57,7 @@ def parse_args():
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--flow-state-min", type=float, default=0.0)
     parser.add_argument("--flow-state-max", type=float, default=0.5)
+    parser.add_argument("--hard-ce-weight", type=float, default=0.5)
     parser.add_argument("--consistency-weight", type=float, default=0.0)
     parser.add_argument("--consistency-start-step", type=int, default=400)
     parser.add_argument("--seed", type=int, default=17)
@@ -206,6 +208,7 @@ def evaluate_distillation(
     was_training = model.training
     model.eval()
     losses = []
+    hard_ce_losses = []
     accuracies = []
 
     for batch_idx, batch in enumerate(dataloader):
@@ -223,6 +226,14 @@ def evaluate_distillation(
             device=device,
         )
         losses.append(float(forward_kl_distillation(out["student_logits"], out["teacher_logits"], temperature).cpu()))
+        hard_ce_losses.append(
+            float(
+                F.cross_entropy(
+                    out["student_logits"].reshape(-1, out["student_logits"].shape[-1]).float(),
+                    out["target_ids"].reshape(-1),
+                ).cpu()
+            )
+        )
         accuracies.append(float(token_accuracy(out["student_logits"], out["target_ids"]).cpu()))
 
     if was_training:
@@ -230,6 +241,7 @@ def evaluate_distillation(
 
     return {
         "eval_loss": sum(losses) / len(losses) if losses else float("inf"),
+        "eval_hard_ce": sum(hard_ce_losses) / len(hard_ce_losses) if hard_ce_losses else float("inf"),
         "eval_top1": sum(accuracies) / len(accuracies) if accuracies else 0.0,
         "eval_batches": len(losses),
     }
@@ -321,6 +333,7 @@ def main() -> None:
     global_step = 0
     running_loss = 0.0
     running_ce_loss = 0.0
+    running_hard_ce_loss = 0.0
     running_consistency_loss = 0.0
     running_acc = 0.0
     best_eval_loss = float("inf")
@@ -350,6 +363,10 @@ def main() -> None:
                     out["teacher_logits"],
                     temperature=args.temperature,
                 )
+                hard_ce_loss = F.cross_entropy(
+                    out["student_logits"].reshape(-1, out["student_logits"].shape[-1]).float(),
+                    out["target_ids"].reshape(-1),
+                )
                 consistency = torch.zeros((), device=device)
                 if args.consistency_weight > 0 and global_step >= args.consistency_start_step:
                     consistency = consistency_loss(
@@ -364,11 +381,12 @@ def main() -> None:
                         ar_seq_len=input_ids.shape[1],
                         temperature=args.temperature,
                     )
-                loss = ce_loss + args.consistency_weight * consistency
+                loss = ce_loss + args.hard_ce_weight * hard_ce_loss + args.consistency_weight * consistency
                 (loss / args.gradient_accumulation_steps).backward()
 
                 running_loss += float(loss.detach().cpu())
                 running_ce_loss += float(ce_loss.detach().cpu())
+                running_hard_ce_loss += float(hard_ce_loss.detach().cpu())
                 running_consistency_loss += float(consistency.detach().cpu())
                 running_acc += float(token_accuracy(out["student_logits"].detach(), out["target_ids"]).cpu())
 
@@ -387,6 +405,7 @@ def main() -> None:
                         denom = args.log_every * args.gradient_accumulation_steps
                         avg_loss = running_loss / denom
                         avg_ce = running_ce_loss / denom
+                        avg_hard_ce = running_hard_ce_loss / denom
                         avg_consistency = running_consistency_loss / denom
                         avg_acc = running_acc / denom
                         lr = scheduler.get_last_lr()[0]
@@ -396,6 +415,8 @@ def main() -> None:
                             "epoch": epoch,
                             "loss": avg_loss,
                             "teacher_kl": avg_ce,
+                            "hard_ce": avg_hard_ce,
+                            "hard_ce_weight": args.hard_ce_weight,
                             "consistency_loss": avg_consistency,
                             "top1": avg_acc,
                             "lr": lr,
@@ -405,13 +426,14 @@ def main() -> None:
                         }
                         print(
                             f"step={global_step} loss={avg_loss:.5f} teacher_kl={avg_ce:.5f} "
-                            f"consistency={avg_consistency:.5f} top1={avg_acc:.4f} "
+                            f"hard_ce={avg_hard_ce:.5f} consistency={avg_consistency:.5f} top1={avg_acc:.4f} "
                             f"lr={lr:.3e} peak_gb={record['peak_memory_gb']:.2f}"
                         )
                         metrics_file.write(json.dumps(record, sort_keys=True) + "\n")
                         metrics_file.flush()
                         running_loss = 0.0
                         running_ce_loss = 0.0
+                        running_hard_ce_loss = 0.0
                         running_consistency_loss = 0.0
                         running_acc = 0.0
 

@@ -18,7 +18,8 @@ attn_implementation: sdpa
 temperature: 1.0
 flow_state_min: 0.0
 flow_state_max: 0.0
-consistency_weight: 0.05
+hard_ce_weight: 0.5
+consistency_weight: 0.0
 consistency_start_step: 400
 seed: 17
 num_workers: 2
