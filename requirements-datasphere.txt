@@ -1,7 +1,8 @@
 accelerate>=1.8.0
 datasets>=3.6.0
 huggingface-hub>=0.33.0
-numpy>=1.26.0
+numpy==1.23.5
+pandas==1.5.3
 pyyaml>=6.0.2
 safetensors>=0.5.3
 torch>=2.6.0
