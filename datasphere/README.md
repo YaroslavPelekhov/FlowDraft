@@ -43,3 +43,36 @@ HF_TOKEN=hf_... VENV_DIR=/tmp/flowdraft_venv CLEAN_OUTPUT=1 \
 ```
 
 It writes to `/dev/shm/flowdraft_runs/flowdraft_quick2h` and benchmarks both one-jump and two-jump flow drafting. Compare `benchmark_best_flow1_summary.json` and `benchmark_best_flow2_summary.json` against the Orthrus `benchmark_best_summary.json`.
+
+## Local DataSphere Jobs
+
+This repository can also be launched from a local machine through DataSphere Jobs without opening JupyterLab.
+
+Install the local CLI tools:
+
+```bash
+scripts/install-datasphere-cli.sh
+```
+
+Configure Yandex Cloud authentication as required by DataSphere Jobs, then export the project id and Hugging Face token:
+
+```bash
+export DATASPHERE_PROJECT_ID=<project_id>
+export HF_TOKEN=hf_...
+```
+
+Run the FlowDraft hard-CE quick experiment:
+
+```bash
+scripts/remote-run.sh
+```
+
+The default job config is `datasphere/jobs/flowdraft-hardce.yaml`. It requests `g1.1`, uses a 100GB working storage, keeps large checkpoints in `/dev/shm`, and returns metrics under `outputs/flowdraft_hardce_quick2h`. If your project uses a different A100 configuration name, edit `cloud-instance-types` in the YAML before launch.
+
+Useful commands:
+
+```bash
+scripts/remote-list.sh
+scripts/remote-attach.sh <JOB_ID>
+scripts/remote-download.sh <JOB_ID>
+```

@@ -6,8 +6,8 @@ log() {
 }
 
 VENV_DIR="${VENV_DIR:-/tmp/flowdraft_venv}"
-PYTHON_BIN="$VENV_DIR/bin/python"
-if [ ! -x "$PYTHON_BIN" ]; then
+PYTHON_BIN="${PYTHON_BIN:-$VENV_DIR/bin/python}"
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1 && [ ! -x "$PYTHON_BIN" ]; then
   echo "Virtualenv not found at ${VENV_DIR}. Run: VENV_DIR=${VENV_DIR} bash datasphere/setup_venv.sh" >&2
   exit 1
 fi
