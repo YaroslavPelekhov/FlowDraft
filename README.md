@@ -121,6 +121,36 @@ Run inference from the current best checkpoint:
 
 Use `--mode ar` for the sequential baseline and `--mode diffusion` for Orthrus generation.
 
+## FlowDraft MVP
+
+FlowDraft replaces the Orthrus masked-diffusion drafting call with a categorical flow-map style endpoint drafter while keeping the frozen AR backbone and AR verifier unchanged. The first MVP trains the same trainable diffusion projections with endpoint teacher distillation from the frozen AR head, plus an optional late consistency term.
+
+Run the matched 600-step quick comparison:
+
+```bash
+HF_TOKEN=hf_... VENV_DIR=/tmp/flowdraft_venv CLEAN_OUTPUT=1 \
+  bash datasphere/run_flowdraft_quick_compare_venv.sh
+```
+
+Defaults:
+
+- output under `/dev/shm/flowdraft_runs/flowdraft_quick2h`
+- same packed Nemotron data as the Orthrus quick run
+- `MAX_STEPS=600`
+- `block_size=32`
+- `FLOW_STEPS="1 2"` for one-jump and two-jump drafting benchmarks
+- only `best/` and `last/` checkpoints are kept
+
+Compare against the Orthrus quick baseline:
+
+```bash
+cat /dev/shm/flowdraft_runs/orthrus_quick2h/benchmark_best_summary.json
+cat /dev/shm/flowdraft_runs/flowdraft_quick2h/benchmark_best_flow1_summary.json
+cat /dev/shm/flowdraft_runs/flowdraft_quick2h/benchmark_best_flow2_summary.json
+```
+
+The main numbers are `mean_speedup`, `mean_flowdraft_tpf`, `mean_acceptance`, and `parity_rate`. A useful first success criterion is FlowDraft `flow_steps=1` beating the Orthrus quick baseline's TPF/speedup without reducing parity.
+
 Inspect available disk/GPU resources before a longer run:
 
 ```bash

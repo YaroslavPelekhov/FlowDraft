@@ -34,3 +34,12 @@ Single-prompt inference from the best checkpoint:
   --prompt "Solve: if a rectangle has length 12 and width 7, what is its area?" \
   --max-new-tokens 256
 ```
+
+To run the matched FlowDraft MVP experiment after the Orthrus baseline:
+
+```bash
+HF_TOKEN=hf_... VENV_DIR=/tmp/flowdraft_venv CLEAN_OUTPUT=1 \
+  bash datasphere/run_flowdraft_quick_compare_venv.sh
+```
+
+It writes to `/dev/shm/flowdraft_runs/flowdraft_quick2h` and benchmarks both one-jump and two-jump flow drafting. Compare `benchmark_best_flow1_summary.json` and `benchmark_best_flow2_summary.json` against the Orthrus `benchmark_best_summary.json`.
