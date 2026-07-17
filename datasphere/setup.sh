@@ -19,10 +19,10 @@ fi
 
 log "Using Python: $("$PYTHON_BIN" --version 2>&1)"
 log "Upgrading pip"
-"$PYTHON_BIN" -m pip install --upgrade pip --progress-bar on
+"$PYTHON_BIN" -m pip install --upgrade pip --progress-bar on --no-cache-dir
 
 log "Installing project dependencies from requirements-datasphere.txt"
-"$PYTHON_BIN" -m pip install -r requirements-datasphere.txt --progress-bar on
+"$PYTHON_BIN" -m pip install -r requirements-datasphere.txt --progress-bar on --no-cache-dir
 
 if [ ! -d upstream_orthrus/.git ]; then
   log "Cloning official Orthrus repository"
@@ -32,6 +32,6 @@ else
 fi
 
 log "Installing local training package in editable mode"
-"$PYTHON_BIN" -m pip install -e .
+"$PYTHON_BIN" -m pip install -e . --no-cache-dir
 
 log "Setup complete"

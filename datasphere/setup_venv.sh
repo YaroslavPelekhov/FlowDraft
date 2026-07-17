@@ -31,10 +31,10 @@ VENV_PYTHON="$VENV_DIR/bin/python"
 
 log "Using venv Python: $("$VENV_PYTHON" --version 2>&1)"
 log "Upgrading pip inside virtualenv"
-"$VENV_PYTHON" -m pip install --upgrade pip --progress-bar on
+"$VENV_PYTHON" -m pip install --upgrade pip --progress-bar on --no-cache-dir
 
 log "Installing dependencies inside virtualenv"
-"$VENV_PYTHON" -m pip install -r requirements-datasphere.txt --progress-bar on
+"$VENV_PYTHON" -m pip install -r requirements-datasphere.txt --progress-bar on --no-cache-dir
 
 if [ ! -d upstream_orthrus/.git ]; then
   log "Cloning official Orthrus repository"
@@ -44,6 +44,6 @@ else
 fi
 
 log "Installing local training package in editable mode"
-"$VENV_PYTHON" -m pip install -e .
+"$VENV_PYTHON" -m pip install -e . --no-cache-dir
 
 log "Virtualenv setup complete"
