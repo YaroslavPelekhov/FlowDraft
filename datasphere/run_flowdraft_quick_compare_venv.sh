@@ -33,6 +33,8 @@ SAVE_EVERY="${SAVE_EVERY:-100}"
 EVAL_EVERY="${EVAL_EVERY:-100}"
 BENCH_TOKENS="${BENCH_TOKENS:-128}"
 FLOW_STEPS="${FLOW_STEPS:-1 2}"
+CONSISTENCY_WEIGHT="${CONSISTENCY_WEIGHT:-0.05}"
+CONSISTENCY_START_STEP="${CONSISTENCY_START_STEP:-400}"
 REBUILD_DATA="${REBUILD_DATA:-0}"
 CLEAN_OUTPUT="${CLEAN_OUTPUT:-0}"
 
@@ -96,7 +98,9 @@ log "Training quick FlowDraft checkpoint at ${OUT_DIR}"
   --max-steps "$MAX_STEPS" \
   --epochs "$EPOCHS" \
   --save-every "$SAVE_EVERY" \
-  --eval-every "$EVAL_EVERY"
+  --eval-every "$EVAL_EVERY" \
+  --consistency-weight "$CONSISTENCY_WEIGHT" \
+  --consistency-start-step "$CONSISTENCY_START_STEP"
 
 for steps in $FLOW_STEPS; do
   log "Benchmarking last FlowDraft checkpoint with flow_steps=${steps}"
