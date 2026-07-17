@@ -62,12 +62,15 @@ def load_prompts(path: str | Path) -> list[dict]:
 
 def encode_prompt(tokenizer, prompt: str, device: torch.device) -> torch.Tensor:
     messages = [{"role": "system", "content": ""}, {"role": "user", "content": prompt}]
-    return tokenizer.apply_chat_template(
+    encoded = tokenizer.apply_chat_template(
         messages,
         return_tensors="pt",
         add_generation_prompt=True,
         enable_thinking=False,
-    ).to(device)
+    )
+    if hasattr(encoded, "input_ids"):
+        encoded = encoded.input_ids
+    return encoded.to(device)
 
 
 def sample_greedy(logits: torch.Tensor) -> torch.Tensor:
