@@ -15,8 +15,10 @@ fi
 export HF_HOME="${HF_HOME:-/tmp/flowdraft_hf}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/tmp/flowdraft_hf/datasets}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-/tmp/flowdraft_hf/transformers}"
+export TMPDIR="${TMPDIR:-/dev/shm/flowdraft_tmp}"
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+mkdir -p "$TMPDIR"
 
 DATA_DIR="${DATA_DIR:-/tmp/flowdraft_storage/nemotron_quick_packed}"
 EVAL_DATA_DIR="${EVAL_DATA_DIR:-/tmp/flowdraft_storage/nemotron_quick_eval_packed}"
