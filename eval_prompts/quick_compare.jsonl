@@ -1,0 +1,10 @@
+{"id":"math_area","prompt":"Solve: if a rectangle has length 12 and width 7, what is its area? Answer briefly."}
+{"id":"math_probability","prompt":"A bag has 3 red balls and 5 blue balls. Two balls are drawn without replacement. What is the probability both are red?"}
+{"id":"math_algebra","prompt":"Solve for x: 3x + 14 = 2x + 29. Show the final answer."}
+{"id":"code_fib","prompt":"Write a Python function that returns the Fibonacci sequence up to n terms."}
+{"id":"code_words","prompt":"Write a Python function to count the frequency of each word in a string."}
+{"id":"code_bug","prompt":"Explain what is wrong with this Python code and fix it: for i in range(10) print(i)"}
+{"id":"chat_blue_sky","prompt":"Explain why the sky appears blue in two short paragraphs."}
+{"id":"chat_mergerfs","prompt":"What do the mergerfs options noforget and inodecalc=path-hash mean? Give a concise explanation."}
+{"id":"chat_history","prompt":"Give a short explanation of why the printing press mattered in European history."}
+{"id":"reasoning_schedule","prompt":"Alice starts reading at 9:15 and reads for 45 minutes, then takes a 20 minute break. What time does she resume reading?"}

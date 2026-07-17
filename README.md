@@ -71,6 +71,38 @@ bash datasphere/setup_venv.sh
 bash datasphere/run_a100_venv.sh
 ```
 
+## Quick Comparable Run
+
+For a result in roughly a couple of hours on one A100 80 GB, use the quick compare path. It trains a small Orthrus-Qwen3-1.7B checkpoint and immediately benchmarks AR vs Orthrus greedy decoding.
+
+```bash
+VENV_DIR=/tmp/flowdraft_venv bash datasphere/setup_venv.sh
+HF_TOKEN=hf_... VENV_DIR=/tmp/flowdraft_venv bash datasphere/run_quick_compare_venv.sh
+```
+
+Defaults:
+
+- `MAX_SEQUENCES=20000`
+- `MAX_STEPS=600`
+- `BENCH_TOKENS=128`
+- storage under `/tmp/flowdraft_storage`
+
+Outputs:
+
+- `/tmp/flowdraft_storage/orthrus_quick2h/train_metrics.jsonl`
+- `/tmp/flowdraft_storage/orthrus_quick2h/final`
+- `/tmp/flowdraft_storage/orthrus_quick2h/benchmark_metrics.jsonl`
+- `/tmp/flowdraft_storage/orthrus_quick2h/benchmark_summary.json`
+
+You can shrink it for a fast check:
+
+```bash
+MAX_SEQUENCES=1000 MAX_STEPS=32 BENCH_TOKENS=64 \
+  VENV_DIR=/tmp/flowdraft_venv bash datasphere/run_quick_compare_venv.sh
+```
+
+The benchmark reports exact greedy parity, AR tokens/sec, Orthrus tokens/sec, speedup, Orthrus tokens per forward pass, and acceptance length statistics. This is not paper-scale training, but it gives reproducible numbers for comparing checkpoints and deciding whether a longer run is worth it.
+
 Check greedy lossless parity after training:
 
 ```bash

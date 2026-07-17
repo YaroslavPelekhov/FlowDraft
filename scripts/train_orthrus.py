@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -155,82 +156,107 @@ def main() -> None:
     global_step = 0
     running_loss = 0.0
     running_acc = 0.0
+    started_at = time.perf_counter()
+    metrics_path = output_dir / "train_metrics.jsonl"
+    metrics_file = metrics_path.open("a", encoding="utf-8")
     optimizer.zero_grad(set_to_none=True)
 
-    progress = tqdm(total=total_steps, desc="optimizer steps")
-    for epoch in range(args.epochs):
-        for micro_step, batch in enumerate(dataloader):
-            input_ids = batch.to(device=device, non_blocking=True)
-            anchors = sample_anchor_positions(
-                batch_size=input_ids.shape[0],
-                seq_len=input_ids.shape[1],
-                block_size=args.block_size,
-                num_blocks=args.num_anchor_blocks,
-                device=device,
-            )
-            diffusion_ids, diff_position_ids, causal_limit, teacher_positions, target_ids = make_diffusion_batch(
-                input_ids=input_ids,
-                anchors=anchors,
-                block_size=args.block_size,
-                mask_token_id=args.mask_token_id,
-            )
-
-            with torch.no_grad():
-                ar_outputs = model(input_ids=input_ids, use_cache=True, is_diffusion_pass=False)
-                teacher_logits = gather_logits(ar_outputs.logits, teacher_positions).detach()
-                past_key_values = ar_outputs.past_key_values
-
-            diff_outputs = model(
-                input_ids=diffusion_ids,
-                position_ids=diff_position_ids,
-                past_key_values=past_key_values,
-                use_cache=False,
-                is_diffusion_pass=True,
-                causal_limit=causal_limit,
-                ar_seq_len=input_ids.shape[1],
-            )
-            student_logits = select_student_logits(diff_outputs.logits, args.block_size)
-            loss = forward_kl_distillation(student_logits, teacher_logits, temperature=args.temperature)
-            loss = loss / args.gradient_accumulation_steps
-            loss.backward()
-
-            running_loss += float(loss.detach().cpu()) * args.gradient_accumulation_steps
-            running_acc += float(token_accuracy(student_logits.detach(), target_ids).cpu())
-
-            if (micro_step + 1) % args.gradient_accumulation_steps == 0:
-                torch.nn.utils.clip_grad_norm_(
-                    [p for p in model.parameters() if p.requires_grad],
-                    args.max_grad_norm,
+    try:
+        progress = tqdm(total=total_steps, desc="optimizer steps")
+        for epoch in range(args.epochs):
+            for micro_step, batch in enumerate(dataloader):
+                input_ids = batch.to(device=device, non_blocking=True)
+                anchors = sample_anchor_positions(
+                    batch_size=input_ids.shape[0],
+                    seq_len=input_ids.shape[1],
+                    block_size=args.block_size,
+                    num_blocks=args.num_anchor_blocks,
+                    device=device,
                 )
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
-                global_step += 1
-                progress.update(1)
+                diffusion_ids, diff_position_ids, causal_limit, teacher_positions, target_ids = make_diffusion_batch(
+                    input_ids=input_ids,
+                    anchors=anchors,
+                    block_size=args.block_size,
+                    mask_token_id=args.mask_token_id,
+                )
 
-                if global_step % args.log_every == 0:
-                    denom = args.log_every * args.gradient_accumulation_steps
-                    avg_loss = running_loss / denom
-                    avg_acc = running_acc / denom
-                    lr = scheduler.get_last_lr()[0]
-                    print(f"step={global_step} loss={avg_loss:.5f} top1={avg_acc:.4f} lr={lr:.3e}")
-                    running_loss = 0.0
-                    running_acc = 0.0
+                with torch.no_grad():
+                    ar_outputs = model(input_ids=input_ids, use_cache=True, is_diffusion_pass=False)
+                    teacher_logits = gather_logits(ar_outputs.logits, teacher_positions).detach()
+                    past_key_values = ar_outputs.past_key_values
 
-                if global_step % args.save_every == 0:
-                    ckpt_dir = output_dir / f"checkpoint-{global_step:06d}"
-                    save_orthrus_checkpoint(model, tokenizer, ckpt_dir, args.upstream_dir)
-                    save_training_state(ckpt_dir, optimizer, scheduler, global_step, epoch)
+                diff_outputs = model(
+                    input_ids=diffusion_ids,
+                    position_ids=diff_position_ids,
+                    past_key_values=past_key_values,
+                    use_cache=False,
+                    is_diffusion_pass=True,
+                    causal_limit=causal_limit,
+                    ar_seq_len=input_ids.shape[1],
+                )
+                student_logits = select_student_logits(diff_outputs.logits, args.block_size)
+                loss = forward_kl_distillation(student_logits, teacher_logits, temperature=args.temperature)
+                loss = loss / args.gradient_accumulation_steps
+                loss.backward()
+
+                running_loss += float(loss.detach().cpu()) * args.gradient_accumulation_steps
+                running_acc += float(token_accuracy(student_logits.detach(), target_ids).cpu())
+
+                if (micro_step + 1) % args.gradient_accumulation_steps == 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        [p for p in model.parameters() if p.requires_grad],
+                        args.max_grad_norm,
+                    )
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad(set_to_none=True)
+                    global_step += 1
+                    progress.update(1)
+
+                    if global_step % args.log_every == 0:
+                        denom = args.log_every * args.gradient_accumulation_steps
+                        avg_loss = running_loss / denom
+                        avg_acc = running_acc / denom
+                        lr = scheduler.get_last_lr()[0]
+                        elapsed = time.perf_counter() - started_at
+                        record = {
+                            "step": global_step,
+                            "epoch": epoch,
+                            "loss": avg_loss,
+                            "top1": avg_acc,
+                            "lr": lr,
+                            "elapsed_seconds": elapsed,
+                            "optimizer_steps_per_second": global_step / elapsed if elapsed > 0 else 0.0,
+                            "peak_memory_gb": torch.cuda.max_memory_allocated(device) / (1024**3),
+                        }
+                        print(
+                            f"step={global_step} loss={avg_loss:.5f} top1={avg_acc:.4f} "
+                            f"lr={lr:.3e} peak_gb={record['peak_memory_gb']:.2f}"
+                        )
+                        metrics_file.write(json.dumps(record, sort_keys=True) + "\n")
+                        metrics_file.flush()
+                        running_loss = 0.0
+                        running_acc = 0.0
+
+                    if global_step % args.save_every == 0:
+                        ckpt_dir = output_dir / f"checkpoint-{global_step:06d}"
+                        save_orthrus_checkpoint(model, tokenizer, ckpt_dir, args.upstream_dir)
+                        save_training_state(ckpt_dir, optimizer, scheduler, global_step, epoch)
+
+                    if global_step >= total_steps:
+                        break
 
                 if global_step >= total_steps:
                     break
 
-        if global_step >= total_steps:
-            break
+            if global_step >= total_steps:
+                break
 
-    progress.close()
-    save_orthrus_checkpoint(model, tokenizer, output_dir / "final", args.upstream_dir)
-    save_training_state(output_dir / "final", optimizer, scheduler, global_step, args.epochs)
+        progress.close()
+        save_orthrus_checkpoint(model, tokenizer, output_dir / "final", args.upstream_dir)
+        save_training_state(output_dir / "final", optimizer, scheduler, global_step, args.epochs)
+    finally:
+        metrics_file.close()
 
 
 if __name__ == "__main__":

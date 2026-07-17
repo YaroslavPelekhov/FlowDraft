@@ -16,3 +16,12 @@ bash datasphere/run_a100_venv.sh
 ```
 
 The default A100 config uses 50k packed 2048-token sequences, 32 Orthrus anchor blocks per sequence, and 10k optimizer steps. This is intentionally smaller than the paper's 0.96B-token, 2-epoch setup, because the paper used a single 8xH200 node. Increase `MAX_SEQUENCES`, `num_anchor_blocks`, and `max_steps` when you want a closer reproduction and can afford the runtime.
+
+For a shorter comparable run with benchmark output:
+
+```bash
+VENV_DIR=/tmp/flowdraft_venv bash datasphere/setup_venv.sh
+HF_TOKEN=hf_... VENV_DIR=/tmp/flowdraft_venv bash datasphere/run_quick_compare_venv.sh
+```
+
+Results are written to `/tmp/flowdraft_storage/orthrus_quick2h`.
