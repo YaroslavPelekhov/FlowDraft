@@ -138,6 +138,7 @@ Defaults:
 - same packed Nemotron data as the Orthrus quick run
 - `MAX_STEPS=600`
 - `block_size=32`
+- `FLOW_STATE_MIN=0.0`, `FLOW_STATE_MAX=0.0` for one-jump drafting from the masked prior
 - `FLOW_STEPS="1 2"` for one-jump and two-jump drafting benchmarks
 - only `best/` and `last/` checkpoints are kept
 
