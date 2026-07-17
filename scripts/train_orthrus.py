@@ -52,7 +52,14 @@ def parse_args():
     parser.add_argument("--save-every", type=int, default=1000)
     parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False)
-    return parser.parse_args()
+    args = parser.parse_args()
+    cli_keys = {
+        action.dest
+        for action in parser._actions
+        if action.dest != "help"
+        and any(option in sys.argv[1:] for option in action.option_strings)
+    }
+    return args, cli_keys
 
 
 def load_config_file(path: str | None) -> dict:
@@ -64,10 +71,10 @@ def load_config_file(path: str | None) -> dict:
         return yaml.safe_load(f) or {}
 
 
-def merge_config(args, config: dict):
+def merge_config(args, config: dict, cli_keys: set[str]):
     for key, value in config.items():
         attr = key.replace("-", "_")
-        if hasattr(args, attr):
+        if hasattr(args, attr) and attr not in cli_keys:
             setattr(args, attr, value)
     return args
 
@@ -80,8 +87,8 @@ def select_student_logits(diffusion_logits: torch.Tensor, block_size: int) -> to
 
 
 def main() -> None:
-    parsed_args = parse_args()
-    args = merge_config(parsed_args, load_config_file(parsed_args.config))
+    parsed_args, cli_keys = parse_args()
+    args = merge_config(parsed_args, load_config_file(parsed_args.config), cli_keys)
     set_seed(args.seed)
 
     if not torch.cuda.is_available():
