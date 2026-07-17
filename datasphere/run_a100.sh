@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+log() {
+  printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$*"
+}
+
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
@@ -16,6 +20,8 @@ if [ -z "$PYTHON_BIN" ]; then
   fi
 fi
 
+log "Using Python: $("$PYTHON_BIN" --version 2>&1)"
+log "Preparing packed dataset with MAX_SEQUENCES=${MAX_SEQUENCES:-50000}"
 "$PYTHON_BIN" scripts/prepare_dataset.py \
   --model-name Qwen/Qwen3-1.7B \
   --output-dir data/packed_qwen3_1p7b \
@@ -23,4 +29,7 @@ fi
   --max-sequences "${MAX_SEQUENCES:-50000}" \
   --shard-size 1024
 
+log "Starting Orthrus Qwen3-1.7B training"
 "$PYTHON_BIN" scripts/train_orthrus.py --config configs/a100_80gb.yaml
+
+log "Training script finished"
