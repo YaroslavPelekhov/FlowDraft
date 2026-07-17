@@ -20,7 +20,12 @@ fi
 VENV_DIR="${VENV_DIR:-.venv}"
 
 log "Creating isolated virtualenv at ${VENV_DIR}"
-"$PYTHON_BIN" -m venv "$VENV_DIR"
+if ! "$PYTHON_BIN" -m venv "$VENV_DIR"; then
+  log "stdlib venv is unavailable; falling back to virtualenv"
+  rm -rf "$VENV_DIR"
+  "$PYTHON_BIN" -m pip install --user virtualenv --progress-bar on
+  "$PYTHON_BIN" -m virtualenv "$VENV_DIR"
+fi
 
 VENV_PYTHON="$VENV_DIR/bin/python"
 
