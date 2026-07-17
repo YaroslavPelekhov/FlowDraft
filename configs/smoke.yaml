@@ -17,5 +17,6 @@ attn_implementation: sdpa
 num_workers: 0
 log_every: 1
 save_every: 5
+save_trainer_state: false
 gradient_checkpointing: false
 compile: false

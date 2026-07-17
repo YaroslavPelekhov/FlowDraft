@@ -19,6 +19,7 @@ temperature: 1.0
 seed: 17
 num_workers: 2
 log_every: 10
-save_every: 200
+save_every: 0
+save_trainer_state: false
 gradient_checkpointing: false
 compile: false

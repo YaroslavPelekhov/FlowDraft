@@ -20,5 +20,6 @@ seed: 17
 num_workers: 2
 log_every: 10
 save_every: 1000
+save_trainer_state: false
 gradient_checkpointing: false
 compile: false

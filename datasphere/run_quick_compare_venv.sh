@@ -23,7 +23,7 @@ OUT_DIR="${OUT_DIR:-/tmp/flowdraft_storage/orthrus_quick2h}"
 MAX_SEQUENCES="${MAX_SEQUENCES:-20000}"
 MAX_STEPS="${MAX_STEPS:-600}"
 EPOCHS="${EPOCHS:-1}"
-SAVE_EVERY="${SAVE_EVERY:-200}"
+SAVE_EVERY="${SAVE_EVERY:-0}"
 BENCH_TOKENS="${BENCH_TOKENS:-128}"
 
 log "Preparing ${MAX_SEQUENCES} packed sequences at ${DATA_DIR}"

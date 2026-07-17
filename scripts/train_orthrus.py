@@ -51,6 +51,7 @@ def parse_args():
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--save-every", type=int, default=1000)
+    parser.add_argument("--save-trainer-state", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False)
     args = parser.parse_args()
@@ -238,10 +239,11 @@ def main() -> None:
                         running_loss = 0.0
                         running_acc = 0.0
 
-                    if global_step % args.save_every == 0:
+                    if args.save_every > 0 and global_step % args.save_every == 0:
                         ckpt_dir = output_dir / f"checkpoint-{global_step:06d}"
                         save_orthrus_checkpoint(model, tokenizer, ckpt_dir, args.upstream_dir)
-                        save_training_state(ckpt_dir, optimizer, scheduler, global_step, epoch)
+                        if args.save_trainer_state:
+                            save_training_state(ckpt_dir, optimizer, scheduler, global_step, epoch)
 
                     if global_step >= total_steps:
                         break
@@ -254,7 +256,8 @@ def main() -> None:
 
         progress.close()
         save_orthrus_checkpoint(model, tokenizer, output_dir / "final", args.upstream_dir)
-        save_training_state(output_dir / "final", optimizer, scheduler, global_step, args.epochs)
+        if args.save_trainer_state:
+            save_training_state(output_dir / "final", optimizer, scheduler, global_step, args.epochs)
     finally:
         metrics_file.close()
 
