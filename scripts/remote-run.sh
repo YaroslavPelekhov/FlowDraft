@@ -18,6 +18,14 @@ if ! command -v "$DATASPHERE_BIN" >/dev/null 2>&1 && [ ! -x "$DATASPHERE_BIN" ];
   exit 127
 fi
 
+DATASPHERE_AUTH_ARGS=()
+if [ -n "${DATASPHERE_OAUTH_TOKEN:-}" ]; then
+  DATASPHERE_AUTH_ARGS+=("-t" "$DATASPHERE_OAUTH_TOKEN")
+fi
+if [ -n "${DATASPHERE_PROFILE:-}" ]; then
+  DATASPHERE_AUTH_ARGS+=("--profile" "$DATASPHERE_PROFILE")
+fi
+
 if [ -z "${DATASPHERE_PROJECT_ID:-}" ]; then
   echo "DATASPHERE_PROJECT_ID is not set." >&2
   echo "Set it with: export DATASPHERE_PROJECT_ID=<your_project_id>" >&2
@@ -25,9 +33,7 @@ if [ -z "${DATASPHERE_PROJECT_ID:-}" ]; then
 fi
 
 if [ -z "${HF_TOKEN:-}" ]; then
-  echo "HF_TOKEN is not set. It is needed for the gated Nemotron dataset." >&2
-  echo "Set it with: export HF_TOKEN=hf_..." >&2
-  exit 2
+  echo "HF_TOKEN is not set locally; relying on a DataSphere project secret named HF_TOKEN." >&2
 fi
 
 if [ ! -f "$CONFIG_PATH" ]; then
@@ -35,6 +41,6 @@ if [ ! -f "$CONFIG_PATH" ]; then
   exit 2
 fi
 
-"$DATASPHERE_BIN" project job execute \
+"$DATASPHERE_BIN" "${DATASPHERE_AUTH_ARGS[@]}" project job execute \
   -p "$DATASPHERE_PROJECT_ID" \
   -c "$CONFIG_PATH"

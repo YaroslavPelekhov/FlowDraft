@@ -22,5 +22,13 @@ if ! command -v "$DATASPHERE_BIN" >/dev/null 2>&1 && [ ! -x "$DATASPHERE_BIN" ];
   exit 127
 fi
 
+DATASPHERE_AUTH_ARGS=()
+if [ -n "${DATASPHERE_OAUTH_TOKEN:-}" ]; then
+  DATASPHERE_AUTH_ARGS+=("-t" "$DATASPHERE_OAUTH_TOKEN")
+fi
+if [ -n "${DATASPHERE_PROFILE:-}" ]; then
+  DATASPHERE_AUTH_ARGS+=("--profile" "$DATASPHERE_PROFILE")
+fi
+
 mkdir -p outputs/downloaded-jobs
-"$DATASPHERE_BIN" project job download-files --id "$JOB_ID"
+"$DATASPHERE_BIN" "${DATASPHERE_AUTH_ARGS[@]}" project job download-files --id "$JOB_ID"
