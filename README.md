@@ -110,6 +110,17 @@ MAX_SEQUENCES=1000 MAX_STEPS=32 BENCH_TOKENS=64 \
 
 The training loop writes periodic train metrics, saves `best/` by lowest quick eval KL loss, and saves `last/` every `SAVE_EVERY` steps plus at the end. It never writes numbered checkpoint directories in the quick path, so only `best/` and `last/` exist at any time. The benchmark reports exact greedy parity, AR tokens/sec, Orthrus tokens/sec, speedup, Orthrus tokens per forward pass, acceptance length statistics, and ratios/gaps against the Qwen3-1.7B paper target speedup of 4.25x. This is not paper-scale training, but it gives reproducible numbers for comparing checkpoints and deciding whether a longer run is worth it.
 
+Run inference from the current best checkpoint:
+
+```bash
+/tmp/flowdraft_venv/bin/python scripts/infer_orthrus.py \
+  --checkpoint /dev/shm/flowdraft_runs/orthrus_quick2h/best \
+  --prompt "Solve: if a rectangle has length 12 and width 7, what is its area?" \
+  --max-new-tokens 256
+```
+
+Use `--mode ar` for the sequential baseline and `--mode diffusion` for Orthrus generation.
+
 Inspect available disk/GPU resources before a longer run:
 
 ```bash

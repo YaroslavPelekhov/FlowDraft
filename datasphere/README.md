@@ -25,3 +25,12 @@ HF_TOKEN=hf_... VENV_DIR=/tmp/flowdraft_venv bash datasphere/run_quick_compare_v
 ```
 
 Results are written to `/dev/shm/flowdraft_runs/orthrus_quick2h` by default. The run keeps only `best/` by quick eval KL and `last/` for the latest weights, then benchmarks both when `best/` exists. Existing packed data is reused unless `REBUILD_DATA=1`; old model outputs are removed only when `CLEAN_OUTPUT=1`.
+
+Single-prompt inference from the best checkpoint:
+
+```bash
+/tmp/flowdraft_venv/bin/python scripts/infer_orthrus.py \
+  --checkpoint /dev/shm/flowdraft_runs/orthrus_quick2h/best \
+  --prompt "Solve: if a rectangle has length 12 and width 7, what is its area?" \
+  --max-new-tokens 256
+```
