@@ -21,6 +21,8 @@ def parse_args():
     parser.add_argument("--dataset-name", default="nvidia/Nemotron-Post-Training-Dataset-v2")
     parser.add_argument("--dataset-config", default="default")
     parser.add_argument("--splits", nargs="+", default=["chat", "math", "code"])
+    parser.add_argument("--categories", nargs="+", default=None)
+    parser.add_argument("--category-field", default="category")
     parser.add_argument("--model-name", default="Qwen/Qwen3-1.7B")
     parser.add_argument("--output-dir", default="data/packed_qwen3_1p7b")
     parser.add_argument("--seq-len", type=int, default=2048)
@@ -38,6 +40,12 @@ def load_split(dataset_name: str, dataset_config: str | None, split: str, stream
         if dataset_config and dataset_config != "SFT":
             return load_dataset(dataset_name, "SFT", split=split, streaming=streaming, token=token)
         raise
+
+
+def filter_category(dataset_iter, category_field: str, category: str):
+    for example in dataset_iter:
+        if example.get(category_field) == category:
+            yield example
 
 
 def example_to_text(example: dict, tokenizer) -> str:
@@ -82,15 +90,30 @@ def main() -> None:
     tokenizer = load_tokenizer(args.model_name)
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
 
-    datasets = {
-        split: iter(load_split(args.dataset_name, args.dataset_config, split, args.streaming, hf_token))
-        for split in args.splits
-    }
+    if args.categories:
+        base_split = args.splits[0]
+        datasets = {
+            category: filter_category(
+                iter(load_split(args.dataset_name, args.dataset_config, base_split, args.streaming, hf_token)),
+                args.category_field,
+                category,
+            )
+            for category in args.categories
+        }
+        source_order = list(args.categories)
+    else:
+        datasets = {
+            split: iter(load_split(args.dataset_name, args.dataset_config, split, args.streaming, hf_token))
+            for split in args.splits
+        }
+        source_order = list(args.splits)
 
     manifest = {
         "dataset_name": args.dataset_name,
         "dataset_config": args.dataset_config,
         "splits": args.splits,
+        "categories": args.categories,
+        "category_field": args.category_field,
         "model_name": args.model_name,
         "seq_len": args.seq_len,
         "shards": [],
@@ -104,7 +127,7 @@ def main() -> None:
 
     progress = tqdm(total=args.max_sequences, desc="packed sequences")
     while produced < args.max_sequences:
-        split = args.splits[split_cursor % len(args.splits)]
+        split = source_order[split_cursor % len(source_order)]
         split_cursor += 1
         example = next(datasets[split])
         text = example_to_text(example, tokenizer)
