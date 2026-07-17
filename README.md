@@ -90,9 +90,13 @@ Defaults:
 Outputs:
 
 - `/tmp/flowdraft_storage/orthrus_quick2h/train_metrics.jsonl`
+- `/tmp/flowdraft_storage/orthrus_quick2h/best`
+- `/tmp/flowdraft_storage/orthrus_quick2h/best_metrics.json`
 - `/tmp/flowdraft_storage/orthrus_quick2h/final`
+- `/tmp/flowdraft_storage/orthrus_quick2h/final_metrics.json`
 - `/tmp/flowdraft_storage/orthrus_quick2h/benchmark_metrics.jsonl`
 - `/tmp/flowdraft_storage/orthrus_quick2h/benchmark_summary.json`
+- `/tmp/flowdraft_storage/orthrus_quick2h/benchmark_best_summary.json`
 
 You can shrink it for a fast check:
 
@@ -101,7 +105,7 @@ MAX_SEQUENCES=1000 MAX_STEPS=32 BENCH_TOKENS=64 \
   VENV_DIR=/tmp/flowdraft_venv bash datasphere/run_quick_compare_venv.sh
 ```
 
-The benchmark reports exact greedy parity, AR tokens/sec, Orthrus tokens/sec, speedup, Orthrus tokens per forward pass, and acceptance length statistics. This is not paper-scale training, but it gives reproducible numbers for comparing checkpoints and deciding whether a longer run is worth it.
+The training loop writes periodic train metrics and, when `--eval-manifest` is set, saves `best/` by lowest quick eval KL loss while always saving `final/`. The benchmark reports exact greedy parity, AR tokens/sec, Orthrus tokens/sec, speedup, Orthrus tokens per forward pass, acceptance length statistics, and ratios/gaps against the Qwen3-1.7B paper target speedup of 4.25x. This is not paper-scale training, but it gives reproducible numbers for comparing checkpoints and deciding whether a longer run is worth it.
 
 Check greedy lossless parity after training:
 

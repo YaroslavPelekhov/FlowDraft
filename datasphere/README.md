@@ -24,4 +24,4 @@ VENV_DIR=/tmp/flowdraft_venv bash datasphere/setup_venv.sh
 HF_TOKEN=hf_... VENV_DIR=/tmp/flowdraft_venv bash datasphere/run_quick_compare_venv.sh
 ```
 
-Results are written to `/tmp/flowdraft_storage/orthrus_quick2h`.
+Results are written to `/tmp/flowdraft_storage/orthrus_quick2h`. The run saves both `best/` by quick eval KL and `final/`, then benchmarks both when `best/` exists.

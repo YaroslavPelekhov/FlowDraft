@@ -19,6 +19,9 @@ temperature: 1.0
 seed: 17
 num_workers: 2
 log_every: 10
+eval_every: 100
+eval_batches: 8
+eval_anchor_blocks: 8
 save_every: 0
 save_trainer_state: false
 gradient_checkpointing: false

@@ -32,6 +32,7 @@ def parse_args():
     parser.add_argument("--upstream-dir", default="upstream_orthrus")
     parser.add_argument("--base-model", default="Qwen/Qwen3-1.7B")
     parser.add_argument("--train-manifest", default="data/packed_qwen3_1p7b/manifest.json")
+    parser.add_argument("--eval-manifest", default=None)
     parser.add_argument("--output-dir", default="outputs/orthrus-qwen3-1p7b-a100")
     parser.add_argument("--block-size", type=int, default=32)
     parser.add_argument("--mask-token-id", type=int, default=151669)
@@ -50,6 +51,9 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--log-every", type=int, default=10)
+    parser.add_argument("--eval-every", type=int, default=0)
+    parser.add_argument("--eval-batches", type=int, default=8)
+    parser.add_argument("--eval-anchor-blocks", type=int, default=8)
     parser.add_argument("--save-every", type=int, default=1000)
     parser.add_argument("--save-trainer-state", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=False)
@@ -88,6 +92,65 @@ def select_student_logits(diffusion_logits: torch.Tensor, block_size: int) -> to
     return logits[:, :, : block_size - 1, :].reshape(batch_size, num_blocks * (block_size - 1), vocab_size)
 
 
+@torch.no_grad()
+def evaluate_distillation(
+    model,
+    dataloader: DataLoader,
+    device: torch.device,
+    block_size: int,
+    mask_token_id: int,
+    num_anchor_blocks: int,
+    temperature: float,
+    max_batches: int,
+) -> dict[str, float]:
+    was_training = model.training
+    model.eval()
+    losses = []
+    accuracies = []
+
+    for batch_idx, batch in enumerate(dataloader):
+        if batch_idx >= max_batches:
+            break
+        input_ids = batch.to(device=device, non_blocking=True)
+        anchors = sample_anchor_positions(
+            batch_size=input_ids.shape[0],
+            seq_len=input_ids.shape[1],
+            block_size=block_size,
+            num_blocks=num_anchor_blocks,
+            device=device,
+        )
+        diffusion_ids, diff_position_ids, causal_limit, teacher_positions, target_ids = make_diffusion_batch(
+            input_ids=input_ids,
+            anchors=anchors,
+            block_size=block_size,
+            mask_token_id=mask_token_id,
+        )
+
+        ar_outputs = model(input_ids=input_ids, use_cache=True, is_diffusion_pass=False)
+        teacher_logits = gather_logits(ar_outputs.logits, teacher_positions).detach()
+        diff_outputs = model(
+            input_ids=diffusion_ids,
+            position_ids=diff_position_ids,
+            past_key_values=ar_outputs.past_key_values,
+            use_cache=False,
+            is_diffusion_pass=True,
+            causal_limit=causal_limit,
+            ar_seq_len=input_ids.shape[1],
+        )
+        student_logits = select_student_logits(diff_outputs.logits, block_size)
+        losses.append(float(forward_kl_distillation(student_logits, teacher_logits, temperature=temperature).cpu()))
+        accuracies.append(float(token_accuracy(student_logits, target_ids).cpu()))
+
+    if was_training:
+        model.train()
+
+    return {
+        "eval_loss": sum(losses) / len(losses) if losses else float("inf"),
+        "eval_top1": sum(accuracies) / len(accuracies) if accuracies else 0.0,
+        "eval_batches": len(losses),
+    }
+
+
 def main() -> None:
     parsed_args, cli_keys = parse_args()
     args = merge_config(parsed_args, load_config_file(parsed_args.config), cli_keys)
@@ -111,6 +174,17 @@ def main() -> None:
         pin_memory=True,
         drop_last=True,
     )
+    eval_dataloader = None
+    if args.eval_manifest:
+        eval_dataset = PackedTokenDataset(args.eval_manifest)
+        eval_dataloader = DataLoader(
+            eval_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            drop_last=True,
+        )
 
     model, load_info = build_orthrus_from_qwen(
         base_model_name_or_path=args.base_model,
@@ -157,6 +231,8 @@ def main() -> None:
     global_step = 0
     running_loss = 0.0
     running_acc = 0.0
+    best_eval_loss = float("inf")
+    best_step = None
     started_at = time.perf_counter()
     metrics_path = output_dir / "train_metrics.jsonl"
     metrics_file = metrics_path.open("a", encoding="utf-8")
@@ -239,6 +315,50 @@ def main() -> None:
                         running_loss = 0.0
                         running_acc = 0.0
 
+                    if eval_dataloader is not None and args.eval_every > 0 and global_step % args.eval_every == 0:
+                        eval_record = evaluate_distillation(
+                            model=model,
+                            dataloader=eval_dataloader,
+                            device=device,
+                            block_size=args.block_size,
+                            mask_token_id=args.mask_token_id,
+                            num_anchor_blocks=args.eval_anchor_blocks,
+                            temperature=args.temperature,
+                            max_batches=args.eval_batches,
+                        )
+                        eval_record.update(
+                            {
+                                "step": global_step,
+                                "epoch": epoch,
+                                "kind": "eval",
+                                "best_eval_loss": best_eval_loss,
+                            }
+                        )
+                        print(
+                            f"eval step={global_step} loss={eval_record['eval_loss']:.5f} "
+                            f"top1={eval_record['eval_top1']:.4f}"
+                        )
+                        metrics_file.write(json.dumps(eval_record, sort_keys=True) + "\n")
+                        metrics_file.flush()
+
+                        if eval_record["eval_loss"] < best_eval_loss:
+                            best_eval_loss = eval_record["eval_loss"]
+                            best_step = global_step
+                            best_dir = output_dir / "best"
+                            save_orthrus_checkpoint(model, tokenizer, best_dir, args.upstream_dir)
+                            with (output_dir / "best_metrics.json").open("w", encoding="utf-8") as f:
+                                json.dump(
+                                    {
+                                        "best_step": best_step,
+                                        "best_eval_loss": best_eval_loss,
+                                        "best_eval_top1": eval_record["eval_top1"],
+                                    },
+                                    f,
+                                    indent=2,
+                                    sort_keys=True,
+                                )
+                                f.write("\n")
+
                     if args.save_every > 0 and global_step % args.save_every == 0:
                         ckpt_dir = output_dir / f"checkpoint-{global_step:06d}"
                         save_orthrus_checkpoint(model, tokenizer, ckpt_dir, args.upstream_dir)
@@ -256,6 +376,18 @@ def main() -> None:
 
         progress.close()
         save_orthrus_checkpoint(model, tokenizer, output_dir / "final", args.upstream_dir)
+        with (output_dir / "final_metrics.json").open("w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "final_step": global_step,
+                    "best_step": best_step,
+                    "best_eval_loss": best_eval_loss if best_step is not None else None,
+                },
+                f,
+                indent=2,
+                sort_keys=True,
+            )
+            f.write("\n")
         if args.save_trainer_state:
             save_training_state(output_dir / "final", optimizer, scheduler, global_step, args.epochs)
     finally:

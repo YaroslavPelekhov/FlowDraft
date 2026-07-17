@@ -26,6 +26,8 @@ def parse_args():
     parser.add_argument("--warmup-prompts", type=int, default=1)
     parser.add_argument("--attn-implementation", default="sdpa")
     parser.add_argument("--dtype", default="bf16")
+    parser.add_argument("--paper-speedup-target", type=float, default=4.25)
+    parser.add_argument("--paper-tpf-target", type=float, default=4.25)
     return parser.parse_args()
 
 
@@ -259,6 +261,16 @@ def main() -> None:
         "p50_acceptance": percentile([row["acceptance_p50"] for row in rows], 0.50),
         "p90_acceptance": percentile([row["acceptance_p90"] for row in rows], 0.90),
     }
+    summary["paper_speedup_target"] = args.paper_speedup_target
+    summary["paper_tpf_target"] = args.paper_tpf_target
+    summary["speedup_vs_paper_target"] = (
+        summary["mean_speedup"] / args.paper_speedup_target if args.paper_speedup_target > 0 else 0.0
+    )
+    summary["tpf_vs_paper_target"] = (
+        summary["mean_orthrus_tpf"] / args.paper_tpf_target if args.paper_tpf_target > 0 else 0.0
+    )
+    summary["speedup_gap_to_paper_target"] = args.paper_speedup_target - summary["mean_speedup"]
+    summary["tpf_gap_to_paper_target"] = args.paper_tpf_target - summary["mean_orthrus_tpf"]
     print("SUMMARY " + json.dumps(summary, ensure_ascii=False), flush=True)
 
     if args.summary_json:
