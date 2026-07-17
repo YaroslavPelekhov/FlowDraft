@@ -157,6 +157,9 @@ def main() -> None:
         json.dump(manifest, f, indent=2, sort_keys=True)
         f.write("\n")
 
+    if args.streaming and os.environ.get("FLOWDRAFT_STREAMING_HARD_EXIT", "1") == "1":
+        os._exit(0)
+
 
 if __name__ == "__main__":
     main()
