@@ -64,6 +64,13 @@ Run the practical A100 recipe:
 bash datasphere/run_a100.sh
 ```
 
+For Yandex DataSphere, the cleaner isolated option is:
+
+```bash
+bash datasphere/setup_venv.sh
+bash datasphere/run_a100_venv.sh
+```
+
 Check greedy lossless parity after training:
 
 ```bash
