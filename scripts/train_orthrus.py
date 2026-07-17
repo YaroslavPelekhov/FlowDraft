@@ -233,6 +233,7 @@ def main() -> None:
     running_acc = 0.0
     best_eval_loss = float("inf")
     best_step = None
+    best_eval_top1 = None
     started_at = time.perf_counter()
     metrics_path = output_dir / "train_metrics.jsonl"
     metrics_file = metrics_path.open("a", encoding="utf-8")
@@ -344,14 +345,15 @@ def main() -> None:
                         if eval_record["eval_loss"] < best_eval_loss:
                             best_eval_loss = eval_record["eval_loss"]
                             best_step = global_step
-                            best_dir = output_dir / "best"
-                            save_orthrus_checkpoint(model, tokenizer, best_dir, args.upstream_dir)
+                            best_eval_top1 = eval_record["eval_top1"]
+                            save_orthrus_checkpoint(model, tokenizer, output_dir / "best", args.upstream_dir)
                             with (output_dir / "best_metrics.json").open("w", encoding="utf-8") as f:
                                 json.dump(
                                     {
                                         "best_step": best_step,
                                         "best_eval_loss": best_eval_loss,
-                                        "best_eval_top1": eval_record["eval_top1"],
+                                        "best_eval_top1": best_eval_top1,
+                                        "checkpoint_written": True,
                                     },
                                     f,
                                     indent=2,
@@ -360,10 +362,22 @@ def main() -> None:
                                 f.write("\n")
 
                     if args.save_every > 0 and global_step % args.save_every == 0:
-                        ckpt_dir = output_dir / f"checkpoint-{global_step:06d}"
-                        save_orthrus_checkpoint(model, tokenizer, ckpt_dir, args.upstream_dir)
+                        last_dir = output_dir / "last"
+                        save_orthrus_checkpoint(model, tokenizer, last_dir, args.upstream_dir)
+                        with (output_dir / "last_metrics.json").open("w", encoding="utf-8") as f:
+                            json.dump(
+                                {
+                                    "last_step": global_step,
+                                    "best_step": best_step,
+                                    "best_eval_loss": best_eval_loss if best_step is not None else None,
+                                },
+                                f,
+                                indent=2,
+                                sort_keys=True,
+                            )
+                            f.write("\n")
                         if args.save_trainer_state:
-                            save_training_state(ckpt_dir, optimizer, scheduler, global_step, epoch)
+                            save_training_state(last_dir, optimizer, scheduler, global_step, epoch)
 
                     if global_step >= total_steps:
                         break
@@ -375,11 +389,11 @@ def main() -> None:
                 break
 
         progress.close()
-        save_orthrus_checkpoint(model, tokenizer, output_dir / "final", args.upstream_dir)
-        with (output_dir / "final_metrics.json").open("w", encoding="utf-8") as f:
+        save_orthrus_checkpoint(model, tokenizer, output_dir / "last", args.upstream_dir)
+        with (output_dir / "last_metrics.json").open("w", encoding="utf-8") as f:
             json.dump(
                 {
-                    "final_step": global_step,
+                    "last_step": global_step,
                     "best_step": best_step,
                     "best_eval_loss": best_eval_loss if best_step is not None else None,
                 },
@@ -389,7 +403,7 @@ def main() -> None:
             )
             f.write("\n")
         if args.save_trainer_state:
-            save_training_state(output_dir / "final", optimizer, scheduler, global_step, args.epochs)
+            save_training_state(output_dir / "last", optimizer, scheduler, global_step, args.epochs)
     finally:
         metrics_file.close()
 

@@ -87,18 +87,19 @@ Defaults:
 - `BENCH_TOKENS=128`
 - `REBUILD_DATA=0`, so existing packed data is reused
 - `CLEAN_OUTPUT=0`, set to `1` for a fresh output directory
-- storage under `/tmp/flowdraft_storage`
+- packed data under `/tmp/flowdraft_storage`
+- model outputs under `/dev/shm/flowdraft_runs/orthrus_quick2h` by default
 
 Outputs:
 
-- `/tmp/flowdraft_storage/orthrus_quick2h/train_metrics.jsonl`
-- `/tmp/flowdraft_storage/orthrus_quick2h/best`
-- `/tmp/flowdraft_storage/orthrus_quick2h/best_metrics.json`
-- `/tmp/flowdraft_storage/orthrus_quick2h/final`
-- `/tmp/flowdraft_storage/orthrus_quick2h/final_metrics.json`
-- `/tmp/flowdraft_storage/orthrus_quick2h/benchmark_metrics.jsonl`
-- `/tmp/flowdraft_storage/orthrus_quick2h/benchmark_summary.json`
-- `/tmp/flowdraft_storage/orthrus_quick2h/benchmark_best_summary.json`
+- `/dev/shm/flowdraft_runs/orthrus_quick2h/train_metrics.jsonl`
+- `/dev/shm/flowdraft_runs/orthrus_quick2h/best`
+- `/dev/shm/flowdraft_runs/orthrus_quick2h/best_metrics.json`
+- `/dev/shm/flowdraft_runs/orthrus_quick2h/last`
+- `/dev/shm/flowdraft_runs/orthrus_quick2h/last_metrics.json`
+- `/dev/shm/flowdraft_runs/orthrus_quick2h/benchmark_metrics.jsonl`
+- `/dev/shm/flowdraft_runs/orthrus_quick2h/benchmark_summary.json`
+- `/dev/shm/flowdraft_runs/orthrus_quick2h/benchmark_best_summary.json`
 
 You can shrink it for a fast check:
 
@@ -107,7 +108,7 @@ MAX_SEQUENCES=1000 MAX_STEPS=32 BENCH_TOKENS=64 \
   VENV_DIR=/tmp/flowdraft_venv bash datasphere/run_quick_compare_venv.sh
 ```
 
-The training loop writes periodic train metrics and, when `--eval-manifest` is set, saves `best/` by lowest quick eval KL loss while always saving `final/`. The benchmark reports exact greedy parity, AR tokens/sec, Orthrus tokens/sec, speedup, Orthrus tokens per forward pass, acceptance length statistics, and ratios/gaps against the Qwen3-1.7B paper target speedup of 4.25x. This is not paper-scale training, but it gives reproducible numbers for comparing checkpoints and deciding whether a longer run is worth it.
+The training loop writes periodic train metrics, saves `best/` by lowest quick eval KL loss, and saves `last/` every `SAVE_EVERY` steps plus at the end. It never writes numbered checkpoint directories in the quick path, so only `best/` and `last/` exist at any time. The benchmark reports exact greedy parity, AR tokens/sec, Orthrus tokens/sec, speedup, Orthrus tokens per forward pass, acceptance length statistics, and ratios/gaps against the Qwen3-1.7B paper target speedup of 4.25x. This is not paper-scale training, but it gives reproducible numbers for comparing checkpoints and deciding whether a longer run is worth it.
 
 Inspect available disk/GPU resources before a longer run:
 
@@ -126,7 +127,7 @@ Check greedy lossless parity after training:
 
 ```bash
 python scripts/evaluate_lossless.py \
-  --checkpoint outputs/orthrus-qwen3-1p7b-a100/final \
+  --checkpoint /dev/shm/flowdraft_runs/orthrus_quick2h/best \
   --max-new-tokens 128
 ```
 

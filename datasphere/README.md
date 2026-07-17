@@ -24,4 +24,4 @@ VENV_DIR=/tmp/flowdraft_venv bash datasphere/setup_venv.sh
 HF_TOKEN=hf_... VENV_DIR=/tmp/flowdraft_venv bash datasphere/run_quick_compare_venv.sh
 ```
 
-Results are written to `/tmp/flowdraft_storage/orthrus_quick2h`. The run saves both `best/` by quick eval KL and `final/`, then benchmarks both when `best/` exists. Existing packed data is reused unless `REBUILD_DATA=1`; old model outputs are removed only when `CLEAN_OUTPUT=1`.
+Results are written to `/dev/shm/flowdraft_runs/orthrus_quick2h` by default. The run keeps only `best/` by quick eval KL and `last/` for the latest weights, then benchmarks both when `best/` exists. Existing packed data is reused unless `REBUILD_DATA=1`; old model outputs are removed only when `CLEAN_OUTPUT=1`.

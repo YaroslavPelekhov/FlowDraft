@@ -25,12 +25,12 @@ mkdir -p "$HF_MODULES_CACHE" "$XDG_CACHE_HOME"
 
 DATA_DIR="${DATA_DIR:-/tmp/flowdraft_storage/nemotron_quick_packed}"
 EVAL_DATA_DIR="${EVAL_DATA_DIR:-/tmp/flowdraft_storage/nemotron_quick_eval_packed}"
-OUT_DIR="${OUT_DIR:-/tmp/flowdraft_storage/orthrus_quick2h}"
+OUT_DIR="${OUT_DIR:-/dev/shm/flowdraft_runs/orthrus_quick2h}"
 MAX_SEQUENCES="${MAX_SEQUENCES:-20000}"
 EVAL_SEQUENCES="${EVAL_SEQUENCES:-512}"
 MAX_STEPS="${MAX_STEPS:-600}"
 EPOCHS="${EPOCHS:-1}"
-SAVE_EVERY="${SAVE_EVERY:-0}"
+SAVE_EVERY="${SAVE_EVERY:-100}"
 EVAL_EVERY="${EVAL_EVERY:-100}"
 BENCH_TOKENS="${BENCH_TOKENS:-128}"
 REBUILD_DATA="${REBUILD_DATA:-0}"
@@ -38,6 +38,21 @@ CLEAN_OUTPUT="${CLEAN_OUTPUT:-0}"
 
 log "Resource preflight"
 "$PYTHON_BIN" scripts/inspect_resources.py --paths / /tmp /dev/shm /home/jupyter || true
+OUT_PARENT="$(dirname "$OUT_DIR")"
+mkdir -p "$OUT_PARENT"
+"$PYTHON_BIN" - "$OUT_PARENT" <<'PY'
+import shutil
+import sys
+path = sys.argv[1]
+free_gb = shutil.disk_usage(path).free / (1024**3)
+print(f"Output filesystem free space at {path}: {free_gb:.2f} GiB")
+if free_gb < 12:
+    print(
+        "WARNING: best+last full checkpoints may need roughly 8-10 GiB plus write headroom. "
+        "Prefer OUT_DIR=/dev/shm/flowdraft_runs/orthrus_quick2h or free more space.",
+        file=sys.stderr,
+    )
+PY
 
 if [ "$CLEAN_OUTPUT" = "1" ]; then
   log "Removing previous output at ${OUT_DIR}"
@@ -83,9 +98,9 @@ log "Training quick Orthrus checkpoint at ${OUT_DIR}"
   --save-every "$SAVE_EVERY" \
   --eval-every "$EVAL_EVERY"
 
-log "Benchmarking final checkpoint"
+log "Benchmarking last checkpoint"
 "$PYTHON_BIN" scripts/benchmark_orthrus.py \
-  --checkpoint "$OUT_DIR/final" \
+  --checkpoint "$OUT_DIR/last" \
   --prompts-jsonl eval_prompts/quick_compare.jsonl \
   --output-jsonl "$OUT_DIR/benchmark_metrics.jsonl" \
   --summary-json "$OUT_DIR/benchmark_summary.json" \

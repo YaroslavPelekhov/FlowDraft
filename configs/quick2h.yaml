@@ -1,7 +1,7 @@
 upstream_dir: upstream_orthrus
 base_model: Qwen/Qwen3-1.7B
 train_manifest: /tmp/flowdraft_storage/nemotron_quick_packed/manifest.json
-output_dir: /tmp/flowdraft_storage/orthrus_quick2h
+output_dir: /dev/shm/flowdraft_runs/orthrus_quick2h
 block_size: 32
 mask_token_id: 151669
 num_anchor_blocks: 32
@@ -22,7 +22,7 @@ log_every: 10
 eval_every: 100
 eval_batches: 8
 eval_anchor_blocks: 8
-save_every: 0
+save_every: 100
 save_trainer_state: false
 gradient_checkpointing: false
 compile: false
