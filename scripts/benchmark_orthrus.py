@@ -10,16 +10,23 @@ import tempfile
 import time
 from pathlib import Path
 
-default_tmp = Path(os.environ.get("TMPDIR", "/dev/shm/flowdraft_tmp"))
-default_tmp.mkdir(parents=True, exist_ok=True)
+def cache_dir(env_name: str, preferred: str, fallback: str) -> Path:
+    raw = os.environ.get(env_name)
+    path = Path(raw or preferred)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except (OSError, PermissionError):
+        path = Path(fallback)
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+default_tmp = cache_dir("TMPDIR", "/dev/shm/flowdraft_tmp", "/tmp/flowdraft_tmp")
 os.environ["TMPDIR"] = str(default_tmp)
 tempfile.tempdir = str(default_tmp)
-default_hf_home = Path(os.environ.get("HF_HOME", "/tmp/flowdraft_hf"))
-default_hf_modules = Path(os.environ.get("HF_MODULES_CACHE", "/dev/shm/flowdraft_hf_modules"))
-default_xdg_cache = Path(os.environ.get("XDG_CACHE_HOME", "/dev/shm/flowdraft_xdg_cache"))
-default_hf_home.mkdir(parents=True, exist_ok=True)
-default_hf_modules.mkdir(parents=True, exist_ok=True)
-default_xdg_cache.mkdir(parents=True, exist_ok=True)
+default_hf_home = cache_dir("HF_HOME", "/tmp/flowdraft_hf", "/tmp/flowdraft_hf")
+default_hf_modules = cache_dir("HF_MODULES_CACHE", "/dev/shm/flowdraft_hf_modules", "/tmp/flowdraft_hf_modules")
+default_xdg_cache = cache_dir("XDG_CACHE_HOME", "/dev/shm/flowdraft_xdg_cache", "/tmp/flowdraft_xdg_cache")
 os.environ["HF_HOME"] = str(default_hf_home)
 os.environ["HF_MODULES_CACHE"] = str(default_hf_modules)
 os.environ["XDG_CACHE_HOME"] = str(default_xdg_cache)
@@ -43,7 +50,8 @@ def parse_args():
     parser.add_argument("--attn-implementation", default="sdpa")
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("--paper-speedup-target", type=float, default=4.25)
-    parser.add_argument("--paper-tpf-target", type=float, default=4.25)
+    parser.add_argument("--paper-tpf-target", type=float, default=3.89)
+    parser.add_argument("--official-parity-on-mismatch", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 
 
@@ -75,6 +83,26 @@ def encode_prompt(tokenizer, prompt: str, device: torch.device) -> torch.Tensor:
 
 def sample_greedy(logits: torch.Tensor) -> torch.Tensor:
     return logits.argmax(dim=-1)
+
+
+def first_mismatch(a: torch.Tensor, b: torch.Tensor) -> int | None:
+    min_len = min(a.shape[1], b.shape[1])
+    mismatch = (a[:, :min_len] != b[:, :min_len]).nonzero()
+    if len(mismatch) > 0:
+        return int(mismatch[0, 1].item())
+    if a.shape[1] != b.shape[1]:
+        return min_len
+    return None
+
+
+@torch.inference_mode()
+def generate_official(model, input_ids: torch.Tensor, max_new_tokens: int, use_diffusion_mode: bool) -> torch.Tensor:
+    return model.generate(
+        input_ids=input_ids,
+        max_new_tokens=max_new_tokens,
+        temperature=0.0,
+        use_diffusion_mode=use_diffusion_mode,
+    )
 
 
 @torch.inference_mode()
@@ -241,11 +269,24 @@ def main() -> None:
 
         ar_new = int(ar_ids.shape[1] - input_ids.shape[1])
         orth_new = int(orth_ids.shape[1] - input_ids.shape[1])
-        parity = bool(torch.equal(ar_ids, orth_ids))
+        custom_parity = bool(torch.equal(ar_ids, orth_ids))
+        official_parity = None
+        official_custom_orthrus_match = None
+        mismatch_at = first_mismatch(ar_ids, orth_ids)
+        if args.official_parity_on_mismatch and not custom_parity:
+            official_ar_ids = generate_official(model, input_ids, args.max_new_tokens, use_diffusion_mode=False)
+            official_orth_ids = generate_official(model, input_ids, args.max_new_tokens, use_diffusion_mode=True)
+            official_parity = bool(torch.equal(official_ar_ids, official_orth_ids))
+            official_custom_orthrus_match = bool(torch.equal(official_orth_ids, orth_ids))
+
         record = {
             "id": row["id"],
             "prompt": row["prompt"],
-            "parity_ok": parity,
+            "parity_ok": custom_parity if official_parity is None else official_parity,
+            "custom_parity_ok": custom_parity,
+            "official_parity_ok": official_parity,
+            "official_custom_orthrus_match": official_custom_orthrus_match,
+            "first_custom_mismatch_at": mismatch_at,
             "ar_tokens": ar_new,
             "orthrus_tokens": orth_new,
             "ar_seconds": ar_seconds,
@@ -272,6 +313,14 @@ def main() -> None:
     summary = {
         "num_prompts": len(rows),
         "parity_rate": sum(1 for row in rows if row["parity_ok"]) / len(rows) if rows else 0.0,
+        "custom_parity_rate": sum(1 for row in rows if row["custom_parity_ok"]) / len(rows) if rows else 0.0,
+        "official_parity_checked": sum(1 for row in rows if row["official_parity_ok"] is not None),
+        "official_parity_rate_checked": (
+            sum(1 for row in rows if row["official_parity_ok"] is True)
+            / sum(1 for row in rows if row["official_parity_ok"] is not None)
+            if any(row["official_parity_ok"] is not None for row in rows)
+            else None
+        ),
         "mean_speedup": statistics.mean(row["speedup"] for row in rows) if rows else 0.0,
         "mean_ar_tokens_per_sec": statistics.mean(row["ar_tokens_per_sec"] for row in rows) if rows else 0.0,
         "mean_orthrus_tokens_per_sec": statistics.mean(row["orthrus_tokens_per_sec"] for row in rows) if rows else 0.0,

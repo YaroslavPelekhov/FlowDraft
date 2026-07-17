@@ -85,6 +85,8 @@ Defaults:
 - `MAX_SEQUENCES=20000`
 - `MAX_STEPS=600`
 - `BENCH_TOKENS=128`
+- `REBUILD_DATA=0`, so existing packed data is reused
+- `CLEAN_OUTPUT=0`, set to `1` for a fresh output directory
 - storage under `/tmp/flowdraft_storage`
 
 Outputs:
@@ -106,6 +108,19 @@ MAX_SEQUENCES=1000 MAX_STEPS=32 BENCH_TOKENS=64 \
 ```
 
 The training loop writes periodic train metrics and, when `--eval-manifest` is set, saves `best/` by lowest quick eval KL loss while always saving `final/`. The benchmark reports exact greedy parity, AR tokens/sec, Orthrus tokens/sec, speedup, Orthrus tokens per forward pass, acceptance length statistics, and ratios/gaps against the Qwen3-1.7B paper target speedup of 4.25x. This is not paper-scale training, but it gives reproducible numbers for comparing checkpoints and deciding whether a longer run is worth it.
+
+Inspect available disk/GPU resources before a longer run:
+
+```bash
+/tmp/flowdraft_venv/bin/python scripts/inspect_resources.py --paths / /tmp /dev/shm /home/jupyter
+```
+
+For a fresh quick run that reuses packed data but deletes old model outputs:
+
+```bash
+HF_TOKEN=hf_... VENV_DIR=/tmp/flowdraft_venv CLEAN_OUTPUT=1 \
+  bash datasphere/run_quick_compare_venv.sh
+```
 
 Check greedy lossless parity after training:
 

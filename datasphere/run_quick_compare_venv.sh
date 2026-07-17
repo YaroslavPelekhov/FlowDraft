@@ -33,26 +33,44 @@ EPOCHS="${EPOCHS:-1}"
 SAVE_EVERY="${SAVE_EVERY:-0}"
 EVAL_EVERY="${EVAL_EVERY:-100}"
 BENCH_TOKENS="${BENCH_TOKENS:-128}"
+REBUILD_DATA="${REBUILD_DATA:-0}"
+CLEAN_OUTPUT="${CLEAN_OUTPUT:-0}"
 
-log "Preparing ${MAX_SEQUENCES} packed sequences at ${DATA_DIR}"
-"$PYTHON_BIN" scripts/prepare_dataset.py \
-  --dataset-name nvidia/Nemotron-Post-Training-Dataset-v2 \
-  --dataset-config default \
-  --splits chat math code \
-  --output-dir "$DATA_DIR" \
-  --seq-len 2048 \
-  --max-sequences "$MAX_SEQUENCES" \
-  --shard-size 512
+log "Resource preflight"
+"$PYTHON_BIN" scripts/inspect_resources.py --paths / /tmp /dev/shm /home/jupyter || true
 
-log "Preparing ${EVAL_SEQUENCES} eval packed sequences at ${EVAL_DATA_DIR}"
-"$PYTHON_BIN" scripts/prepare_dataset.py \
-  --dataset-name nvidia/Nemotron-Post-Training-Dataset-v2 \
-  --dataset-config default \
-  --splits chat math code \
-  --output-dir "$EVAL_DATA_DIR" \
-  --seq-len 2048 \
-  --max-sequences "$EVAL_SEQUENCES" \
-  --shard-size 512
+if [ "$CLEAN_OUTPUT" = "1" ]; then
+  log "Removing previous output at ${OUT_DIR}"
+  rm -rf "$OUT_DIR"
+fi
+
+if [ "$REBUILD_DATA" = "1" ] || [ ! -f "$DATA_DIR/manifest.json" ]; then
+  log "Preparing ${MAX_SEQUENCES} packed sequences at ${DATA_DIR}"
+  "$PYTHON_BIN" scripts/prepare_dataset.py \
+    --dataset-name nvidia/Nemotron-Post-Training-Dataset-v2 \
+    --dataset-config default \
+    --splits chat math code \
+    --output-dir "$DATA_DIR" \
+    --seq-len 2048 \
+    --max-sequences "$MAX_SEQUENCES" \
+    --shard-size 512
+else
+  log "Reusing packed training data at ${DATA_DIR}"
+fi
+
+if [ "$REBUILD_DATA" = "1" ] || [ ! -f "$EVAL_DATA_DIR/manifest.json" ]; then
+  log "Preparing ${EVAL_SEQUENCES} eval packed sequences at ${EVAL_DATA_DIR}"
+  "$PYTHON_BIN" scripts/prepare_dataset.py \
+    --dataset-name nvidia/Nemotron-Post-Training-Dataset-v2 \
+    --dataset-config default \
+    --splits chat math code \
+    --output-dir "$EVAL_DATA_DIR" \
+    --seq-len 2048 \
+    --max-sequences "$EVAL_SEQUENCES" \
+    --shard-size 512
+else
+  log "Reusing packed eval data at ${EVAL_DATA_DIR}"
+fi
 
 log "Training quick Orthrus checkpoint at ${OUT_DIR}"
 "$PYTHON_BIN" scripts/train_orthrus.py \
