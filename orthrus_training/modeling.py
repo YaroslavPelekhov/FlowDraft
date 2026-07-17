@@ -32,7 +32,29 @@ def import_upstream_orthrus(upstream_dir: str | Path):
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
+    patch_flex_attention_compat(module)
     return module
+
+
+def patch_flex_attention_compat(module) -> None:
+    """Make upstream Orthrus FlexAttention usable on DataSphere's torch 2.5.x.
+
+    The official repo targets a newer FlexAttention API and passes
+    kernel_options={"BACKEND": "FLASH"}. In torch 2.5.x this can be emitted into
+    Triton code as a bare FLASH symbol and fail at compile time. The default
+    FlexAttention backend is sufficient for the reconstructed training loop.
+    """
+
+    def fused_flex_attention_compat(q, k, v, mask=None):
+        return module._compiled_flex_attention(
+            q,
+            k,
+            v,
+            block_mask=mask,
+            enable_gqa=True,
+        )
+
+    module.fused_flex_attention = fused_flex_attention_compat
 
 
 def build_orthrus_from_qwen(
