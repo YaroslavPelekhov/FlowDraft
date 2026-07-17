@@ -14,6 +14,15 @@ default_tmp = Path(os.environ.get("TMPDIR", "/dev/shm/flowdraft_tmp"))
 default_tmp.mkdir(parents=True, exist_ok=True)
 os.environ["TMPDIR"] = str(default_tmp)
 tempfile.tempdir = str(default_tmp)
+default_hf_home = Path(os.environ.get("HF_HOME", "/tmp/flowdraft_hf"))
+default_hf_modules = Path(os.environ.get("HF_MODULES_CACHE", "/dev/shm/flowdraft_hf_modules"))
+default_xdg_cache = Path(os.environ.get("XDG_CACHE_HOME", "/dev/shm/flowdraft_xdg_cache"))
+default_hf_home.mkdir(parents=True, exist_ok=True)
+default_hf_modules.mkdir(parents=True, exist_ok=True)
+default_xdg_cache.mkdir(parents=True, exist_ok=True)
+os.environ["HF_HOME"] = str(default_hf_home)
+os.environ["HF_MODULES_CACHE"] = str(default_hf_modules)
+os.environ["XDG_CACHE_HOME"] = str(default_xdg_cache)
 
 import torch
 import torch.nn.functional as F
