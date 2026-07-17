@@ -189,7 +189,10 @@ def generate_flowdraft_greedy(
             else:
                 draft_tokens = torch.empty((1, 0), dtype=torch.long, device=device)
 
-        proposed_block = state_ids if state_ids is not None else output_ids[:, start_idx : start_idx + 1]
+        if draft_tokens is not None and draft_tokens.numel():
+            proposed_block = torch.cat([output_ids[:, start_idx : start_idx + 1], draft_tokens], dim=1)
+        else:
+            proposed_block = output_ids[:, start_idx : start_idx + 1]
         ar_outputs = model(
             input_ids=proposed_block,
             position_ids=diff_position_ids,
