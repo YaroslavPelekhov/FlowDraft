@@ -56,6 +56,7 @@ def parse_args():
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("--paper-speedup-target", type=float, default=4.25)
     parser.add_argument("--paper-tpf-target", type=float, default=3.89)
+    parser.add_argument("--require-parity", action="store_true")
     return parser.parse_args()
 
 
@@ -313,6 +314,8 @@ def main() -> None:
     summary = {
         "num_prompts": len(rows),
         "flow_steps": args.flow_steps,
+        "dtype": args.dtype,
+        "attn_implementation": args.attn_implementation,
         "parity_rate": sum(1 for row in rows if row["parity_ok"]) / len(rows) if rows else 0.0,
         "mean_speedup": statistics.mean(row["speedup"] for row in rows) if rows else 0.0,
         "mean_ar_tokens_per_sec": statistics.mean(row["ar_tokens_per_sec"] for row in rows) if rows else 0.0,
@@ -338,6 +341,9 @@ def main() -> None:
         with Path(args.summary_json).open("w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, sort_keys=True)
             f.write("\n")
+
+    if args.require_parity and summary["parity_rate"] < 1.0:
+        raise SystemExit(f"Parity check failed: parity_rate={summary['parity_rate']:.6f}")
 
 
 if __name__ == "__main__":

@@ -17,6 +17,10 @@ bash datasphere/run_a100_venv.sh
 
 The default A100 config uses 50k packed 2048-token sequences, 32 Orthrus anchor blocks per sequence, and 10k optimizer steps. This is intentionally smaller than the paper's 0.96B-token, 2-epoch setup, because the paper used a single 8xH200 node. Increase `MAX_SEQUENCES`, `num_anchor_blocks`, and `max_steps` when you want a closer reproduction and can afford the runtime.
 
+The official paper protocol is tracked in
+[`../docs/official_benchmarks.md`](/Users/yaroslavpelehov/Downloads/FlowDraft/docs/official_benchmarks.md) and
+[`../configs/eval/orthrus_paper_suite.yaml`](/Users/yaroslavpelehov/Downloads/FlowDraft/configs/eval/orthrus_paper_suite.yaml).
+
 For a shorter comparable run with benchmark output:
 
 ```bash
@@ -25,6 +29,15 @@ HF_TOKEN=hf_... VENV_DIR=/tmp/flowdraft_venv bash datasphere/run_quick_compare_v
 ```
 
 Results are written to `/dev/shm/flowdraft_runs/orthrus_quick2h` by default. The run keeps only `best/` by quick eval KL and `last/` for the latest weights, then benchmarks both when `best/` exists. Existing packed data is reused unless `REBUILD_DATA=1`; old model outputs are removed only when `CLEAN_OUTPUT=1`.
+
+For a strict lossless gate, set:
+
+```bash
+BENCH_DTYPE=fp32 BENCH_ATTN_IMPLEMENTATION=eager BENCH_REQUIRE_PARITY=1
+```
+
+The default `bf16`/`sdpa` benchmark is a faster smoke check and can produce
+numerical argmax mismatches; do not use it as the final lossless metric.
 
 Single-prompt inference from the best checkpoint:
 
@@ -43,6 +56,9 @@ HF_TOKEN=hf_... VENV_DIR=/tmp/flowdraft_venv CLEAN_OUTPUT=1 \
 ```
 
 It writes to `/dev/shm/flowdraft_runs/flowdraft_quick2h` and benchmarks both one-jump and two-jump flow drafting. Compare `benchmark_best_flow1_summary.json` and `benchmark_best_flow2_summary.json` against the Orthrus `benchmark_best_summary.json`.
+
+For paper-comparable FlowDraft MVP numbers, use `FLOW_STEPS=1` and the same
+strict lossless gate above.
 
 ## Local DataSphere Jobs
 

@@ -33,8 +33,15 @@ EPOCHS="${EPOCHS:-1}"
 SAVE_EVERY="${SAVE_EVERY:-100}"
 EVAL_EVERY="${EVAL_EVERY:-100}"
 BENCH_TOKENS="${BENCH_TOKENS:-128}"
+BENCH_DTYPE="${BENCH_DTYPE:-bf16}"
+BENCH_ATTN_IMPLEMENTATION="${BENCH_ATTN_IMPLEMENTATION:-sdpa}"
+BENCH_REQUIRE_PARITY="${BENCH_REQUIRE_PARITY:-0}"
 REBUILD_DATA="${REBUILD_DATA:-0}"
 CLEAN_OUTPUT="${CLEAN_OUTPUT:-0}"
+BENCH_PARITY_ARGS=()
+if [ "$BENCH_REQUIRE_PARITY" = "1" ]; then
+  BENCH_PARITY_ARGS+=(--require-parity)
+fi
 
 log "Resource preflight"
 "$PYTHON_BIN" scripts/inspect_resources.py --paths / /tmp /dev/shm /home/jupyter || true
@@ -104,7 +111,10 @@ log "Benchmarking last checkpoint"
   --prompts-jsonl eval_prompts/quick_compare.jsonl \
   --output-jsonl "$OUT_DIR/benchmark_metrics.jsonl" \
   --summary-json "$OUT_DIR/benchmark_summary.json" \
-  --max-new-tokens "$BENCH_TOKENS"
+  --max-new-tokens "$BENCH_TOKENS" \
+  --dtype "$BENCH_DTYPE" \
+  --attn-implementation "$BENCH_ATTN_IMPLEMENTATION" \
+  "${BENCH_PARITY_ARGS[@]}"
 
 if [ -d "$OUT_DIR/best" ]; then
   log "Benchmarking best checkpoint"
@@ -113,7 +123,10 @@ if [ -d "$OUT_DIR/best" ]; then
     --prompts-jsonl eval_prompts/quick_compare.jsonl \
     --output-jsonl "$OUT_DIR/benchmark_best_metrics.jsonl" \
     --summary-json "$OUT_DIR/benchmark_best_summary.json" \
-    --max-new-tokens "$BENCH_TOKENS"
+    --max-new-tokens "$BENCH_TOKENS" \
+    --dtype "$BENCH_DTYPE" \
+    --attn-implementation "$BENCH_ATTN_IMPLEMENTATION" \
+    "${BENCH_PARITY_ARGS[@]}"
 fi
 
 log "Quick compare complete: ${OUT_DIR}/benchmark_summary.json"

@@ -52,6 +52,7 @@ def parse_args():
     parser.add_argument("--paper-speedup-target", type=float, default=4.25)
     parser.add_argument("--paper-tpf-target", type=float, default=3.89)
     parser.add_argument("--official-parity-on-mismatch", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--require-parity", action="store_true")
     return parser.parse_args()
 
 
@@ -312,6 +313,8 @@ def main() -> None:
 
     summary = {
         "num_prompts": len(rows),
+        "dtype": args.dtype,
+        "attn_implementation": args.attn_implementation,
         "parity_rate": sum(1 for row in rows if row["parity_ok"]) / len(rows) if rows else 0.0,
         "custom_parity_rate": sum(1 for row in rows if row["custom_parity_ok"]) / len(rows) if rows else 0.0,
         "official_parity_checked": sum(1 for row in rows if row["official_parity_ok"] is not None),
@@ -345,6 +348,9 @@ def main() -> None:
         with Path(args.summary_json).open("w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, sort_keys=True)
             f.write("\n")
+
+    if args.require_parity and summary["parity_rate"] < 1.0:
+        raise SystemExit(f"Parity check failed: parity_rate={summary['parity_rate']:.6f}")
 
 
 if __name__ == "__main__":

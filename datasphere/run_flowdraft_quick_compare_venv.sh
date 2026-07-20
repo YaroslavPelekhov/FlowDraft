@@ -32,6 +32,9 @@ EPOCHS="${EPOCHS:-1}"
 SAVE_EVERY="${SAVE_EVERY:-100}"
 EVAL_EVERY="${EVAL_EVERY:-100}"
 BENCH_TOKENS="${BENCH_TOKENS:-128}"
+BENCH_DTYPE="${BENCH_DTYPE:-bf16}"
+BENCH_ATTN_IMPLEMENTATION="${BENCH_ATTN_IMPLEMENTATION:-sdpa}"
+BENCH_REQUIRE_PARITY="${BENCH_REQUIRE_PARITY:-0}"
 FLOW_STEPS="${FLOW_STEPS:-1}"
 FLOW_STATE_MIN="${FLOW_STATE_MIN:-0.0}"
 FLOW_STATE_MAX="${FLOW_STATE_MAX:-0.0}"
@@ -40,6 +43,10 @@ CONSISTENCY_WEIGHT="${CONSISTENCY_WEIGHT:-0.0}"
 CONSISTENCY_START_STEP="${CONSISTENCY_START_STEP:-400}"
 REBUILD_DATA="${REBUILD_DATA:-0}"
 CLEAN_OUTPUT="${CLEAN_OUTPUT:-0}"
+BENCH_PARITY_ARGS=()
+if [ "$BENCH_REQUIRE_PARITY" = "1" ]; then
+  BENCH_PARITY_ARGS+=(--require-parity)
+fi
 
 log "Resource preflight"
 "$PYTHON_BIN" scripts/inspect_resources.py --paths / /tmp /dev/shm /home/jupyter || true
@@ -116,7 +123,10 @@ for steps in $FLOW_STEPS; do
     --output-jsonl "$OUT_DIR/benchmark_flow${steps}_metrics.jsonl" \
     --summary-json "$OUT_DIR/benchmark_flow${steps}_summary.json" \
     --max-new-tokens "$BENCH_TOKENS" \
-    --flow-steps "$steps"
+    --dtype "$BENCH_DTYPE" \
+    --attn-implementation "$BENCH_ATTN_IMPLEMENTATION" \
+    --flow-steps "$steps" \
+    "${BENCH_PARITY_ARGS[@]}"
 
   if [ -d "$OUT_DIR/best" ]; then
     log "Benchmarking best FlowDraft checkpoint with flow_steps=${steps}"
@@ -126,7 +136,10 @@ for steps in $FLOW_STEPS; do
       --output-jsonl "$OUT_DIR/benchmark_best_flow${steps}_metrics.jsonl" \
       --summary-json "$OUT_DIR/benchmark_best_flow${steps}_summary.json" \
       --max-new-tokens "$BENCH_TOKENS" \
-      --flow-steps "$steps"
+      --dtype "$BENCH_DTYPE" \
+      --attn-implementation "$BENCH_ATTN_IMPLEMENTATION" \
+      --flow-steps "$steps" \
+      "${BENCH_PARITY_ARGS[@]}"
   fi
 done
 

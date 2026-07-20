@@ -1,0 +1,119 @@
+name: orthrus_paper_suite_qwen3_1p7b
+description: Official paper protocol manifest for Orthrus and FlowDraft Qwen3-1.7B comparison.
+
+model:
+  base: Qwen/Qwen3-1.7B
+  target: Orthrus-Qwen3-1.7B
+  flowdraft_primary_steps: 1
+
+training:
+  dataset_name: nvidia/Nemotron-Post-Training-Dataset-v2
+  dataset_config: default
+  splits:
+    - chat
+    - math
+    - code
+  sampling_ratio: "1:1:1"
+  max_seq_len: 2048
+  block_size: 32
+  anchor_blocks_per_sequence: 256
+  examples: 600000
+  epochs: 2
+  frozen_backbone: true
+  objective:
+    orthrus: forward_kl_from_frozen_ar_teacher
+    flowdraft: endpoint_teacher_distillation_plus_optional_flow_consistency
+  scheduler: cosine
+  warmup_ratio: 0.05
+  gradient_clip_norm: 1.0
+  micro_batch_size_per_device: 1
+  gradient_accumulation_steps: 16
+  global_batch_size: 128
+  precision: bf16
+  paper_hardware: 8xH200
+
+lossless_gate:
+  required_parity_rate: 1.0
+  deterministic_mode:
+    temperature: 0
+    dtype: fp32
+    attn_implementation: eager
+  notes:
+    - Use bf16/sdpa only for fast throughput smoke tests.
+    - Do not report speedup or TPF as paper-grade unless parity_rate is 1.0.
+
+metrics:
+  primary:
+    - avg_accepted_length
+    - tokens_per_forward_pass
+    - wall_clock_speedup_vs_ar
+    - parity_rate
+  secondary:
+    - ar_tokens_per_second
+    - accelerated_tokens_per_second
+    - task_accuracy_or_pass_rate
+
+benchmarks:
+  - name: GSM8K
+    task_type: math_reasoning
+    source: openai/gsm8k
+    official_in_paper: true
+    repo_status: needs_official_harness
+  - name: MATH-500
+    task_type: math_reasoning
+    source: HuggingFaceH4/MATH-500
+    official_in_paper: true
+    repo_status: needs_official_harness
+  - name: AIME24
+    task_type: olympiad_math
+    source: HuggingFaceH4/aime_2024
+    official_in_paper: true
+    repo_status: needs_official_harness
+  - name: AIME25
+    task_type: olympiad_math
+    source: math-ai/aime25
+    official_in_paper: true
+    repo_status: needs_official_harness
+  - name: HumanEval
+    task_type: code_generation
+    source: openai/human-eval
+    official_in_paper: true
+    repo_status: needs_code_harness
+  - name: MBPP
+    task_type: code_generation
+    source: google-research-datasets/mbpp
+    official_in_paper: true
+    repo_status: needs_code_harness
+  - name: Pseudo2code
+    task_type: procedural_code_generation
+    source: PrincetonPLI/LongProc
+    subset: pseudo_to_code
+    official_in_paper: true
+    repo_status: needs_longproc_runner
+  - name: LiveCodeBench-v5
+    task_type: code_generation
+    source: LiveCodeBench official runner
+    official_in_paper: true
+    repo_status: needs_official_runner
+
+paper_targets_qwen3_1p7b:
+  greedy_t0:
+    GSM8K: {tpf: 4.20, speedup: 4.37}
+    MATH-500: {tpf: 4.71, speedup: 4.74}
+    AIME24: {tpf: 4.33, speedup: 5.65}
+    AIME25: {tpf: 3.89, speedup: 4.80}
+    HumanEval: {tpf: 2.75, speedup: 3.07}
+    MBPP: {tpf: 2.76, speedup: 3.07}
+    Pseudo2code: {tpf: 4.60, speedup: 4.90}
+    LiveCodeBench-v5: {tpf: 3.86, speedup: 5.87}
+    Average: {tpf: 3.89, speedup: 4.25}
+  sampling_t1:
+    GSM8K: {tpf: 3.88, speedup: 4.04}
+    MATH-500: {tpf: 4.47, speedup: 4.50}
+    AIME24: {tpf: 3.84, speedup: 5.01}
+    AIME25: {tpf: 3.55, speedup: 4.38}
+    HumanEval: {tpf: 2.60, speedup: 2.90}
+    MBPP: {tpf: 2.88, speedup: 3.20}
+    Pseudo2code: {tpf: 4.37, speedup: 4.65}
+    LiveCodeBench-v5: {tpf: 3.58, speedup: 5.44}
+    Average: {tpf: 3.65, speedup: 4.27}

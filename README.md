@@ -8,6 +8,10 @@ This project reconstructs a practical training pipeline for the smallest Orthrus
 
 The official repository currently ships the model architecture and inference path, but not the public training pipeline. This repo adds the missing training layer and clones `upstream_orthrus/` from the official code during setup.
 
+For the paper-grade training/evaluation protocol, see
+[`docs/official_benchmarks.md`](/Users/yaroslavpelehov/Downloads/FlowDraft/docs/official_benchmarks.md) and
+[`configs/eval/orthrus_paper_suite.yaml`](/Users/yaroslavpelehov/Downloads/FlowDraft/configs/eval/orthrus_paper_suite.yaml).
+
 ## What Is Reconstructed
 
 From the paper and upstream code:
@@ -20,7 +24,7 @@ From the paper and upstream code:
 - Frozen backbone: by default only `q_proj_diff`, `k_proj_diff`, and `v_proj_diff` are trainable, matching the paper's statement that `WQdiff`, `WKdiff`, and `WVdiff` are updated
 - Training mask: each diffusion block attends to clean AR cache before its anchor and bidirectionally inside its own corrupted block
 
-The paper-scale run uses 471,952 packed sequences, 2 epochs, 256 anchor blocks per sequence, and was trained on a single 8xH200 node. The A100 config in this repo intentionally reduces anchor blocks and total sequences for a run that is realistic to iterate on with one GPU.
+The paper-scale run uses 600k training examples, 2 epochs, 256 anchor blocks per packed sequence, and was trained on a single 8xH200 node. The A100 config in this repo intentionally reduces anchor blocks and total sequences for a run that is realistic to iterate on with one GPU.
 
 ## Repository Layout
 
@@ -85,6 +89,8 @@ Defaults:
 - `MAX_SEQUENCES=20000`
 - `MAX_STEPS=600`
 - `BENCH_TOKENS=128`
+- `BENCH_DTYPE=bf16`, `BENCH_ATTN_IMPLEMENTATION=sdpa` for fast smoke benchmarking
+- `BENCH_REQUIRE_PARITY=0`, set to `1` for strict lossless CI-style checks
 - `REBUILD_DATA=0`, so existing packed data is reused
 - `CLEAN_OUTPUT=0`, set to `1` for a fresh output directory
 - packed data under `/tmp/flowdraft_storage`
@@ -109,6 +115,17 @@ MAX_SEQUENCES=1000 MAX_STEPS=32 BENCH_TOKENS=64 \
 ```
 
 The training loop writes periodic train metrics, saves `best/` by lowest quick eval KL loss, and saves `last/` every `SAVE_EVERY` steps plus at the end. It never writes numbered checkpoint directories in the quick path, so only `best/` and `last/` exist at any time. The benchmark reports exact greedy parity, AR tokens/sec, Orthrus tokens/sec, speedup, Orthrus tokens per forward pass, acceptance length statistics, and ratios/gaps against the Qwen3-1.7B paper target speedup of 4.25x. This is not paper-scale training, but it gives reproducible numbers for comparing checkpoints and deciding whether a longer run is worth it.
+
+For paper-grade greedy lossless checks, benchmark in deterministic strict mode:
+
+```bash
+BENCH_DTYPE=fp32 BENCH_ATTN_IMPLEMENTATION=eager BENCH_REQUIRE_PARITY=1 \
+  VENV_DIR=/tmp/flowdraft_venv bash datasphere/run_quick_compare_venv.sh
+```
+
+`eval_prompts/quick_compare.jsonl` is still only a small sanity set. The official
+paper suite is GSM8K, MATH-500, AIME24, AIME25, HumanEval, MBPP, Pseudo2code,
+and LiveCodeBench-v5.
 
 Run inference from the current best checkpoint:
 
@@ -138,6 +155,8 @@ Defaults:
 - same packed Nemotron data as the Orthrus quick run
 - `MAX_STEPS=600`
 - `block_size=32`
+- `BENCH_DTYPE=bf16`, `BENCH_ATTN_IMPLEMENTATION=sdpa` for fast smoke benchmarking
+- `BENCH_REQUIRE_PARITY=0`, set to `1` with `BENCH_DTYPE=fp32 BENCH_ATTN_IMPLEMENTATION=eager` for strict lossless checks
 - `FLOW_STATE_MIN=0.0`, `FLOW_STATE_MAX=0.0` for one-jump drafting from the masked prior
 - `HARD_CE_WEIGHT=0.5` to bias the endpoint drafter toward greedy top-1 agreement
 - `CONSISTENCY_WEIGHT=0.0` in the default quick run; enable it only after the CE baseline is healthy
@@ -152,6 +171,13 @@ cat /dev/shm/flowdraft_runs/flowdraft_quick2h/benchmark_best_flow1_summary.json
 ```
 
 The main numbers are `mean_speedup`, `mean_flowdraft_tpf`, `mean_acceptance`, and `parity_rate`. A useful first success criterion is FlowDraft `flow_steps=1` beating the Orthrus quick baseline's TPF/speedup without reducing parity.
+
+For paper-grade FlowDraft parity:
+
+```bash
+BENCH_DTYPE=fp32 BENCH_ATTN_IMPLEMENTATION=eager BENCH_REQUIRE_PARITY=1 \
+  FLOW_STEPS=1 VENV_DIR=/tmp/flowdraft_venv bash datasphere/run_flowdraft_quick_compare_venv.sh
+```
 
 Inspect available disk/GPU resources before a longer run:
 
@@ -189,7 +215,7 @@ python scripts/evaluate_lossless.py \
 
 This is a compute-aware reconstruction, not a claim that one A100 reproduces the full paper checkpoint in the same wall time. To move toward the paper setup, increase:
 
-1. `--max-sequences` in dataset preparation toward `471952`
+1. `--max-sequences` in dataset preparation toward the paper-scale 600k-example regime
 2. `num_anchor_blocks` toward `256`
 3. `epochs` toward `2`
 
