@@ -24,7 +24,14 @@ from orthrus_training.flowdraft import (
     sample_flow_state_mix,
     select_endpoint_logits,
 )
-from orthrus_training.losses import forward_kl_distillation, gather_logits, token_accuracy
+from orthrus_training.losses import (
+    forward_kl_distillation,
+    gather_logits,
+    prefix_acceptance_metrics,
+    prefix_survival_cross_entropy,
+    prefix_survival_weights,
+    token_accuracy,
+)
 from orthrus_training.modeling import (
     build_orthrus_from_qwen,
     count_parameters,
@@ -55,9 +62,13 @@ def parse_args():
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("--attn-implementation", default="sdpa")
     parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--kl-reduction", choices=["batchmean", "tokenmean"], default="batchmean")
     parser.add_argument("--flow-state-min", type=float, default=0.0)
     parser.add_argument("--flow-state-max", type=float, default=0.5)
     parser.add_argument("--hard-ce-weight", type=float, default=0.5)
+    parser.add_argument("--prefix-loss-weight", type=float, default=0.0)
+    parser.add_argument("--prefix-kl-weight", type=float, default=0.0)
+    parser.add_argument("--prefix-weight-decay", type=float, default=0.9)
     parser.add_argument("--consistency-weight", type=float, default=0.0)
     parser.add_argument("--consistency-start-step", type=int, default=400)
     parser.add_argument("--seed", type=int, default=17)
@@ -203,13 +214,19 @@ def evaluate_distillation(
     mask_token_id: int,
     num_anchor_blocks: int,
     temperature: float,
+    kl_reduction: str,
+    prefix_weight_decay: float,
     max_batches: int,
 ) -> dict[str, float]:
     was_training = model.training
     model.eval()
     losses = []
     hard_ce_losses = []
+    prefix_losses = []
     accuracies = []
+    first_token_accuracies = []
+    first_token_ces = []
+    prefix_expected_acceptances = []
 
     for batch_idx, batch in enumerate(dataloader):
         if batch_idx >= max_batches:
@@ -225,7 +242,16 @@ def evaluate_distillation(
             state_max=0.0,
             device=device,
         )
-        losses.append(float(forward_kl_distillation(out["student_logits"], out["teacher_logits"], temperature).cpu()))
+        losses.append(
+            float(
+                forward_kl_distillation(
+                    out["student_logits"],
+                    out["teacher_logits"],
+                    temperature,
+                    reduction=kl_reduction,
+                ).cpu()
+            )
+        )
         hard_ce_losses.append(
             float(
                 F.cross_entropy(
@@ -234,7 +260,21 @@ def evaluate_distillation(
                 ).cpu()
             )
         )
+        prefix_losses.append(
+            float(
+                prefix_survival_cross_entropy(
+                    out["student_logits"],
+                    out["target_ids"],
+                    block_size=block_size,
+                    decay=prefix_weight_decay,
+                ).cpu()
+            )
+        )
         accuracies.append(float(token_accuracy(out["student_logits"], out["target_ids"]).cpu()))
+        prefix_metrics = prefix_acceptance_metrics(out["student_logits"], out["target_ids"], block_size)
+        first_token_accuracies.append(float(prefix_metrics["first_token_acc"].cpu()))
+        first_token_ces.append(float(prefix_metrics["first_token_ce"].cpu()))
+        prefix_expected_acceptances.append(float(prefix_metrics["prefix_expected_acceptance"].cpu()))
 
     if was_training:
         model.train()
@@ -242,7 +282,15 @@ def evaluate_distillation(
     return {
         "eval_loss": sum(losses) / len(losses) if losses else float("inf"),
         "eval_hard_ce": sum(hard_ce_losses) / len(hard_ce_losses) if hard_ce_losses else float("inf"),
+        "eval_prefix_ce": sum(prefix_losses) / len(prefix_losses) if prefix_losses else float("inf"),
         "eval_top1": sum(accuracies) / len(accuracies) if accuracies else 0.0,
+        "eval_first_token_acc": sum(first_token_accuracies) / len(first_token_accuracies)
+        if first_token_accuracies
+        else 0.0,
+        "eval_first_token_ce": sum(first_token_ces) / len(first_token_ces) if first_token_ces else float("inf"),
+        "eval_prefix_expected_acceptance": sum(prefix_expected_acceptances) / len(prefix_expected_acceptances)
+        if prefix_expected_acceptances
+        else 0.0,
         "eval_batches": len(losses),
     }
 
@@ -323,7 +371,8 @@ def main() -> None:
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
 
     metadata = vars(args) | {
-        "method": "flowdraft_ce",
+        "method": "flowdraft_prefix_cfm",
+        "objective": "endpoint_teacher_distillation_plus_prefix_survival_plus_optional_endpoint_consistency",
         "total_params": total_params,
         "trainable_params": trainable_params,
         "trainable_ratio": trainable_ratio,
@@ -334,8 +383,13 @@ def main() -> None:
     running_loss = 0.0
     running_ce_loss = 0.0
     running_hard_ce_loss = 0.0
+    running_prefix_loss = 0.0
+    running_prefix_kl_loss = 0.0
     running_consistency_loss = 0.0
     running_acc = 0.0
+    running_first_acc = 0.0
+    running_first_ce = 0.0
+    running_prefix_expected_acceptance = 0.0
     best_eval_loss = float("inf")
     best_step = None
     best_eval_top1 = None
@@ -362,11 +416,33 @@ def main() -> None:
                     out["student_logits"],
                     out["teacher_logits"],
                     temperature=args.temperature,
+                    reduction=args.kl_reduction,
                 )
                 hard_ce_loss = F.cross_entropy(
                     out["student_logits"].reshape(-1, out["student_logits"].shape[-1]).float(),
                     out["target_ids"].reshape(-1),
                 )
+                prefix_loss = prefix_survival_cross_entropy(
+                    out["student_logits"],
+                    out["target_ids"],
+                    block_size=args.block_size,
+                    decay=args.prefix_weight_decay,
+                )
+                prefix_kl_loss = torch.zeros((), device=device)
+                if args.prefix_kl_weight > 0:
+                    prefix_weights = prefix_survival_weights(
+                        block_size=args.block_size,
+                        decay=args.prefix_weight_decay,
+                        device=device,
+                        dtype=torch.float32,
+                    )
+                    prefix_kl_loss = forward_kl_distillation(
+                        out["student_logits"],
+                        out["teacher_logits"],
+                        temperature=args.temperature,
+                        weights=prefix_weights,
+                        reduction=args.kl_reduction,
+                    )
                 consistency = torch.zeros((), device=device)
                 if args.consistency_weight > 0 and global_step >= args.consistency_start_step:
                     consistency = consistency_loss(
@@ -381,14 +457,26 @@ def main() -> None:
                         ar_seq_len=input_ids.shape[1],
                         temperature=args.temperature,
                     )
-                loss = ce_loss + args.hard_ce_weight * hard_ce_loss + args.consistency_weight * consistency
+                loss = (
+                    ce_loss
+                    + args.hard_ce_weight * hard_ce_loss
+                    + args.prefix_loss_weight * prefix_loss
+                    + args.prefix_kl_weight * prefix_kl_loss
+                    + args.consistency_weight * consistency
+                )
                 (loss / args.gradient_accumulation_steps).backward()
 
                 running_loss += float(loss.detach().cpu())
                 running_ce_loss += float(ce_loss.detach().cpu())
                 running_hard_ce_loss += float(hard_ce_loss.detach().cpu())
+                running_prefix_loss += float(prefix_loss.detach().cpu())
+                running_prefix_kl_loss += float(prefix_kl_loss.detach().cpu())
                 running_consistency_loss += float(consistency.detach().cpu())
                 running_acc += float(token_accuracy(out["student_logits"].detach(), out["target_ids"]).cpu())
+                prefix_metrics = prefix_acceptance_metrics(out["student_logits"].detach(), out["target_ids"], args.block_size)
+                running_first_acc += float(prefix_metrics["first_token_acc"].cpu())
+                running_first_ce += float(prefix_metrics["first_token_ce"].cpu())
+                running_prefix_expected_acceptance += float(prefix_metrics["prefix_expected_acceptance"].cpu())
 
                 if (micro_step + 1) % args.gradient_accumulation_steps == 0:
                     torch.nn.utils.clip_grad_norm_(
@@ -406,8 +494,13 @@ def main() -> None:
                         avg_loss = running_loss / denom
                         avg_ce = running_ce_loss / denom
                         avg_hard_ce = running_hard_ce_loss / denom
+                        avg_prefix = running_prefix_loss / denom
+                        avg_prefix_kl = running_prefix_kl_loss / denom
                         avg_consistency = running_consistency_loss / denom
                         avg_acc = running_acc / denom
+                        avg_first_acc = running_first_acc / denom
+                        avg_first_ce = running_first_ce / denom
+                        avg_prefix_expected_acceptance = running_prefix_expected_acceptance / denom
                         lr = scheduler.get_last_lr()[0]
                         elapsed = time.perf_counter() - started_at
                         record = {
@@ -415,10 +508,19 @@ def main() -> None:
                             "epoch": epoch,
                             "loss": avg_loss,
                             "teacher_kl": avg_ce,
+                            "kl_reduction": args.kl_reduction,
                             "hard_ce": avg_hard_ce,
                             "hard_ce_weight": args.hard_ce_weight,
+                            "prefix_ce": avg_prefix,
+                            "prefix_loss_weight": args.prefix_loss_weight,
+                            "prefix_kl": avg_prefix_kl,
+                            "prefix_kl_weight": args.prefix_kl_weight,
+                            "prefix_weight_decay": args.prefix_weight_decay,
                             "consistency_loss": avg_consistency,
                             "top1": avg_acc,
+                            "first_token_acc": avg_first_acc,
+                            "first_token_ce": avg_first_ce,
+                            "prefix_expected_acceptance": avg_prefix_expected_acceptance,
                             "lr": lr,
                             "elapsed_seconds": elapsed,
                             "optimizer_steps_per_second": global_step / elapsed if elapsed > 0 else 0.0,
@@ -426,7 +528,10 @@ def main() -> None:
                         }
                         print(
                             f"step={global_step} loss={avg_loss:.5f} teacher_kl={avg_ce:.5f} "
-                            f"hard_ce={avg_hard_ce:.5f} consistency={avg_consistency:.5f} top1={avg_acc:.4f} "
+                            f"hard_ce={avg_hard_ce:.5f} prefix_ce={avg_prefix:.5f} "
+                            f"prefix_kl={avg_prefix_kl:.5f} consistency={avg_consistency:.5f} "
+                            f"top1={avg_acc:.4f} first={avg_first_acc:.4f} "
+                            f"prefix_accept={avg_prefix_expected_acceptance:.2f} "
                             f"lr={lr:.3e} peak_gb={record['peak_memory_gb']:.2f}"
                         )
                         metrics_file.write(json.dumps(record, sort_keys=True) + "\n")
@@ -434,8 +539,13 @@ def main() -> None:
                         running_loss = 0.0
                         running_ce_loss = 0.0
                         running_hard_ce_loss = 0.0
+                        running_prefix_loss = 0.0
+                        running_prefix_kl_loss = 0.0
                         running_consistency_loss = 0.0
                         running_acc = 0.0
+                        running_first_acc = 0.0
+                        running_first_ce = 0.0
+                        running_prefix_expected_acceptance = 0.0
 
                     if eval_dataloader is not None and args.eval_every > 0 and global_step % args.eval_every == 0:
                         eval_record = evaluate_distillation(
@@ -446,12 +556,16 @@ def main() -> None:
                             mask_token_id=args.mask_token_id,
                             num_anchor_blocks=args.eval_anchor_blocks,
                             temperature=args.temperature,
+                            kl_reduction=args.kl_reduction,
+                            prefix_weight_decay=args.prefix_weight_decay,
                             max_batches=args.eval_batches,
                         )
                         eval_record.update({"step": global_step, "epoch": epoch, "kind": "eval"})
                         print(
                             f"eval step={global_step} loss={eval_record['eval_loss']:.5f} "
-                            f"top1={eval_record['eval_top1']:.4f}"
+                            f"top1={eval_record['eval_top1']:.4f} "
+                            f"first={eval_record['eval_first_token_acc']:.4f} "
+                            f"prefix_accept={eval_record['eval_prefix_expected_acceptance']:.2f}"
                         )
                         metrics_file.write(json.dumps(eval_record, sort_keys=True) + "\n")
                         metrics_file.flush()
@@ -467,8 +581,12 @@ def main() -> None:
                                     "best_step": best_step,
                                     "best_eval_loss": best_eval_loss,
                                     "best_eval_top1": best_eval_top1,
+                                    "best_eval_first_token_acc": eval_record["eval_first_token_acc"],
+                                    "best_eval_prefix_expected_acceptance": eval_record[
+                                        "eval_prefix_expected_acceptance"
+                                    ],
                                     "checkpoint_written": True,
-                                    "method": "flowdraft_ce",
+                                    "method": "flowdraft_prefix_cfm",
                                 },
                             )
 
@@ -481,7 +599,7 @@ def main() -> None:
                                 "last_step": global_step,
                                 "best_step": best_step,
                                 "best_eval_loss": best_eval_loss if best_step is not None else None,
-                                "method": "flowdraft_ce",
+                                "method": "flowdraft_prefix_cfm",
                             },
                         )
                         if args.save_trainer_state:
@@ -504,7 +622,7 @@ def main() -> None:
                 "last_step": global_step,
                 "best_step": best_step,
                 "best_eval_loss": best_eval_loss if best_step is not None else None,
-                "method": "flowdraft_ce",
+                "method": "flowdraft_prefix_cfm",
             },
         )
         if args.save_trainer_state:

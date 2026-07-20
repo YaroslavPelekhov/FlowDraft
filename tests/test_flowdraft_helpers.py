@@ -1,6 +1,7 @@
 import torch
 
 from orthrus_training.flowdraft import make_flowdraft_batch, make_flowdraft_inputs_embeds
+from orthrus_training.losses import prefix_survival_cross_entropy, prefix_survival_weights
 
 
 class DummyInner(torch.nn.Module):
@@ -38,3 +39,31 @@ def test_flowdraft_batch_and_embeddings_shape():
         state_mix=state_mix,
     )
     assert embeds.shape == (1, 8, 8)
+
+
+def test_prefix_survival_weights_prioritize_early_tokens():
+    weights = prefix_survival_weights(block_size=5, decay=0.9, device=torch.device("cpu"))
+
+    assert weights.shape == (4,)
+    assert torch.all(weights[:-1] > weights[1:])
+    assert torch.isclose(weights.mean(), torch.tensor(1.0), atol=1e-6)
+
+
+def test_prefix_survival_loss_penalizes_early_error_more_than_late_error():
+    target_ids = torch.tensor([[0, 1, 2, 3]])
+    early_wrong = torch.full((1, 4, 5), -4.0)
+    late_wrong = torch.full((1, 4, 5), -4.0)
+
+    for pos, target in enumerate(target_ids[0].tolist()):
+        early_wrong[0, pos, target] = 4.0
+        late_wrong[0, pos, target] = 4.0
+
+    early_wrong[0, 0, 0] = -4.0
+    early_wrong[0, 0, 4] = 4.0
+    late_wrong[0, 3, 3] = -4.0
+    late_wrong[0, 3, 4] = 4.0
+
+    early_loss = prefix_survival_cross_entropy(early_wrong, target_ids, block_size=5, decay=0.9)
+    late_loss = prefix_survival_cross_entropy(late_wrong, target_ids, block_size=5, decay=0.9)
+
+    assert early_loss > late_loss

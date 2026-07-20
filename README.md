@@ -138,9 +138,9 @@ Run inference from the current best checkpoint:
 
 Use `--mode ar` for the sequential baseline and `--mode diffusion` for Orthrus generation.
 
-## FlowDraft MVP
+## FlowDraft prefix-aware CFM MVP
 
-FlowDraft replaces the Orthrus masked-diffusion drafting call with a categorical flow-map style endpoint drafter while keeping the frozen AR backbone and AR verifier unchanged. The first MVP trains the same trainable diffusion projections with endpoint teacher distillation from the frozen AR head, plus an optional late consistency term.
+FlowDraft replaces the Orthrus masked-diffusion drafting call with a categorical flow-map style endpoint drafter while keeping the frozen AR backbone and AR verifier unchanged. The training objective now targets the acceptance bottleneck directly: besides endpoint teacher distillation, it adds prefix-survival losses that weight early draft positions more heavily because AR verification stops at the first mismatch. This is still an MVP, but it is no longer just a cosmetic endpoint swap; the quick config uses random continuous flow states, prefix-weighted hard CE, prefix-weighted teacher KL, and optional endpoint consistency.
 
 Run the matched 600-step quick comparison:
 
@@ -157,9 +157,11 @@ Defaults:
 - `block_size=32`
 - `BENCH_DTYPE=bf16`, `BENCH_ATTN_IMPLEMENTATION=sdpa` for fast smoke benchmarking
 - `BENCH_REQUIRE_PARITY=0`, set to `1` with `BENCH_DTYPE=fp32 BENCH_ATTN_IMPLEMENTATION=eager` for strict lossless checks
-- `FLOW_STATE_MIN=0.0`, `FLOW_STATE_MAX=0.0` for one-jump drafting from the masked prior
+- `FLOW_STATE_MIN=0.0`, `FLOW_STATE_MAX=0.75` to train across masked-to-endpoint flow states
+- `KL_REDUCTION=tokenmean`, so CE and prefix objectives operate on comparable scale
 - `HARD_CE_WEIGHT=0.5` to bias the endpoint drafter toward greedy top-1 agreement
-- `CONSISTENCY_WEIGHT=0.0` in the default quick run; enable it only after the CE baseline is healthy
+- `PREFIX_LOSS_WEIGHT=1.0`, `PREFIX_KL_WEIGHT=0.5`, `PREFIX_WEIGHT_DECAY=0.9` for acceptance-aware front-of-block training
+- `CONSISTENCY_WEIGHT=0.05`, `CONSISTENCY_START_STEP=100` for late endpoint consistency once teacher matching has started
 - `FLOW_STEPS="1"` for the primary one-jump benchmark
 - only `best/` and `last/` checkpoints are kept
 
@@ -170,7 +172,7 @@ cat /dev/shm/flowdraft_runs/orthrus_quick2h/benchmark_best_summary.json
 cat /dev/shm/flowdraft_runs/flowdraft_quick2h/benchmark_best_flow1_summary.json
 ```
 
-The main numbers are `mean_speedup`, `mean_flowdraft_tpf`, `mean_acceptance`, and `parity_rate`. A useful first success criterion is FlowDraft `flow_steps=1` beating the Orthrus quick baseline's TPF/speedup without reducing parity.
+The main benchmark numbers are `mean_speedup`, `mean_flowdraft_tpf`, `mean_acceptance`, and `parity_rate`. During training, watch `first_token_acc` and `prefix_expected_acceptance`; they are the earliest signal that the drafter is improving the accepted prefix rather than only matching isolated later positions.
 
 For paper-grade FlowDraft parity:
 
