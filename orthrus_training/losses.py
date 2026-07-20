@@ -125,6 +125,8 @@ def prefix_acceptance_metrics(
     flat_logits = logits.reshape(num_groups, steps, vocab_size).float()
     flat_targets = target_ids.reshape(num_groups, steps)
     preds = flat_logits.argmax(dim=-1)
+    correct = (preds == flat_targets).float()
+    greedy_prefix = torch.cumprod(correct, dim=-1).sum(dim=-1)
     nll = F.cross_entropy(
         flat_logits.reshape(-1, vocab_size),
         flat_targets.reshape(-1),
@@ -132,8 +134,9 @@ def prefix_acceptance_metrics(
     ).reshape(num_groups, steps)
     prefix_prob = torch.exp((-torch.cumsum(nll, dim=-1)).clamp(min=-30.0, max=0.0))
     return {
-        "first_token_acc": (preds[:, 0] == flat_targets[:, 0]).float().mean(),
+        "first_token_acc": correct[:, 0].mean(),
         "first_token_ce": nll[:, 0].mean(),
+        "greedy_prefix_acceptance": greedy_prefix.mean(),
         "prefix_expected_acceptance": prefix_prob.sum(dim=-1).mean(),
     }
 

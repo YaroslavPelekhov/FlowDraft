@@ -77,6 +77,12 @@ def parse_args():
     parser.add_argument("--eval-every", type=int, default=0)
     parser.add_argument("--eval-batches", type=int, default=8)
     parser.add_argument("--eval-anchor-blocks", type=int, default=8)
+    parser.add_argument("--eval-seed", type=int, default=1701)
+    parser.add_argument(
+        "--best-metric",
+        choices=["eval_greedy_prefix_acceptance", "eval_prefix_expected_acceptance", "eval_loss"],
+        default="eval_greedy_prefix_acceptance",
+    )
     parser.add_argument("--save-every", type=int, default=100)
     parser.add_argument("--save-trainer-state", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=False)
@@ -226,6 +232,7 @@ def evaluate_distillation(
     accuracies = []
     first_token_accuracies = []
     first_token_ces = []
+    greedy_prefix_acceptances = []
     prefix_expected_acceptances = []
 
     for batch_idx, batch in enumerate(dataloader):
@@ -274,6 +281,7 @@ def evaluate_distillation(
         prefix_metrics = prefix_acceptance_metrics(out["student_logits"], out["target_ids"], block_size)
         first_token_accuracies.append(float(prefix_metrics["first_token_acc"].cpu()))
         first_token_ces.append(float(prefix_metrics["first_token_ce"].cpu()))
+        greedy_prefix_acceptances.append(float(prefix_metrics["greedy_prefix_acceptance"].cpu()))
         prefix_expected_acceptances.append(float(prefix_metrics["prefix_expected_acceptance"].cpu()))
 
     if was_training:
@@ -288,6 +296,9 @@ def evaluate_distillation(
         if first_token_accuracies
         else 0.0,
         "eval_first_token_ce": sum(first_token_ces) / len(first_token_ces) if first_token_ces else float("inf"),
+        "eval_greedy_prefix_acceptance": sum(greedy_prefix_acceptances) / len(greedy_prefix_acceptances)
+        if greedy_prefix_acceptances
+        else 0.0,
         "eval_prefix_expected_acceptance": sum(prefix_expected_acceptances) / len(prefix_expected_acceptances)
         if prefix_expected_acceptances
         else 0.0,
@@ -389,8 +400,10 @@ def main() -> None:
     running_acc = 0.0
     running_first_acc = 0.0
     running_first_ce = 0.0
+    running_greedy_prefix_acceptance = 0.0
     running_prefix_expected_acceptance = 0.0
     best_eval_loss = float("inf")
+    best_metric_value = float("inf") if args.best_metric == "eval_loss" else float("-inf")
     best_step = None
     best_eval_top1 = None
     started_at = time.perf_counter()
@@ -476,6 +489,7 @@ def main() -> None:
                 prefix_metrics = prefix_acceptance_metrics(out["student_logits"].detach(), out["target_ids"], args.block_size)
                 running_first_acc += float(prefix_metrics["first_token_acc"].cpu())
                 running_first_ce += float(prefix_metrics["first_token_ce"].cpu())
+                running_greedy_prefix_acceptance += float(prefix_metrics["greedy_prefix_acceptance"].cpu())
                 running_prefix_expected_acceptance += float(prefix_metrics["prefix_expected_acceptance"].cpu())
 
                 if (micro_step + 1) % args.gradient_accumulation_steps == 0:
@@ -500,6 +514,7 @@ def main() -> None:
                         avg_acc = running_acc / denom
                         avg_first_acc = running_first_acc / denom
                         avg_first_ce = running_first_ce / denom
+                        avg_greedy_prefix_acceptance = running_greedy_prefix_acceptance / denom
                         avg_prefix_expected_acceptance = running_prefix_expected_acceptance / denom
                         lr = scheduler.get_last_lr()[0]
                         elapsed = time.perf_counter() - started_at
@@ -520,6 +535,7 @@ def main() -> None:
                             "top1": avg_acc,
                             "first_token_acc": avg_first_acc,
                             "first_token_ce": avg_first_ce,
+                            "greedy_prefix_acceptance": avg_greedy_prefix_acceptance,
                             "prefix_expected_acceptance": avg_prefix_expected_acceptance,
                             "lr": lr,
                             "elapsed_seconds": elapsed,
@@ -531,7 +547,8 @@ def main() -> None:
                             f"hard_ce={avg_hard_ce:.5f} prefix_ce={avg_prefix:.5f} "
                             f"prefix_kl={avg_prefix_kl:.5f} consistency={avg_consistency:.5f} "
                             f"top1={avg_acc:.4f} first={avg_first_acc:.4f} "
-                            f"prefix_accept={avg_prefix_expected_acceptance:.2f} "
+                            f"greedy_prefix={avg_greedy_prefix_acceptance:.2f} "
+                            f"expected_prefix={avg_prefix_expected_acceptance:.2f} "
                             f"lr={lr:.3e} peak_gb={record['peak_memory_gb']:.2f}"
                         )
                         metrics_file.write(json.dumps(record, sort_keys=True) + "\n")
@@ -545,32 +562,45 @@ def main() -> None:
                         running_acc = 0.0
                         running_first_acc = 0.0
                         running_first_ce = 0.0
+                        running_greedy_prefix_acceptance = 0.0
                         running_prefix_expected_acceptance = 0.0
 
                     if eval_dataloader is not None and args.eval_every > 0 and global_step % args.eval_every == 0:
-                        eval_record = evaluate_distillation(
-                            model=model,
-                            dataloader=eval_dataloader,
-                            device=device,
-                            block_size=args.block_size,
-                            mask_token_id=args.mask_token_id,
-                            num_anchor_blocks=args.eval_anchor_blocks,
-                            temperature=args.temperature,
-                            kl_reduction=args.kl_reduction,
-                            prefix_weight_decay=args.prefix_weight_decay,
-                            max_batches=args.eval_batches,
-                        )
+                        eval_cuda_device = device.index if device.index is not None else torch.cuda.current_device()
+                        with torch.random.fork_rng(devices=[eval_cuda_device]):
+                            torch.manual_seed(args.eval_seed)
+                            torch.cuda.manual_seed(args.eval_seed)
+                            eval_record = evaluate_distillation(
+                                model=model,
+                                dataloader=eval_dataloader,
+                                device=device,
+                                block_size=args.block_size,
+                                mask_token_id=args.mask_token_id,
+                                num_anchor_blocks=args.eval_anchor_blocks,
+                                temperature=args.temperature,
+                                kl_reduction=args.kl_reduction,
+                                prefix_weight_decay=args.prefix_weight_decay,
+                                max_batches=args.eval_batches,
+                            )
                         eval_record.update({"step": global_step, "epoch": epoch, "kind": "eval"})
                         print(
                             f"eval step={global_step} loss={eval_record['eval_loss']:.5f} "
                             f"top1={eval_record['eval_top1']:.4f} "
                             f"first={eval_record['eval_first_token_acc']:.4f} "
-                            f"prefix_accept={eval_record['eval_prefix_expected_acceptance']:.2f}"
+                            f"greedy_prefix={eval_record['eval_greedy_prefix_acceptance']:.2f} "
+                            f"expected_prefix={eval_record['eval_prefix_expected_acceptance']:.2f}"
                         )
                         metrics_file.write(json.dumps(eval_record, sort_keys=True) + "\n")
                         metrics_file.flush()
 
-                        if eval_record["eval_loss"] < best_eval_loss:
+                        candidate_value = eval_record[args.best_metric]
+                        improved = (
+                            candidate_value < best_metric_value
+                            if args.best_metric == "eval_loss"
+                            else candidate_value > best_metric_value
+                        )
+                        if improved:
+                            best_metric_value = candidate_value
                             best_eval_loss = eval_record["eval_loss"]
                             best_step = global_step
                             best_eval_top1 = eval_record["eval_top1"]
@@ -579,9 +609,14 @@ def main() -> None:
                                 output_dir / "best_metrics.json",
                                 {
                                     "best_step": best_step,
+                                    "best_metric": args.best_metric,
+                                    "best_metric_value": best_metric_value,
                                     "best_eval_loss": best_eval_loss,
                                     "best_eval_top1": best_eval_top1,
                                     "best_eval_first_token_acc": eval_record["eval_first_token_acc"],
+                                    "best_eval_greedy_prefix_acceptance": eval_record[
+                                        "eval_greedy_prefix_acceptance"
+                                    ],
                                     "best_eval_prefix_expected_acceptance": eval_record[
                                         "eval_prefix_expected_acceptance"
                                     ],
@@ -598,6 +633,8 @@ def main() -> None:
                             {
                                 "last_step": global_step,
                                 "best_step": best_step,
+                                "best_metric": args.best_metric,
+                                "best_metric_value": best_metric_value if best_step is not None else None,
                                 "best_eval_loss": best_eval_loss if best_step is not None else None,
                                 "method": "flowdraft_prefix_cfm",
                             },
@@ -621,6 +658,8 @@ def main() -> None:
             {
                 "last_step": global_step,
                 "best_step": best_step,
+                "best_metric": args.best_metric,
+                "best_metric_value": best_metric_value if best_step is not None else None,
                 "best_eval_loss": best_eval_loss if best_step is not None else None,
                 "method": "flowdraft_prefix_cfm",
             },
