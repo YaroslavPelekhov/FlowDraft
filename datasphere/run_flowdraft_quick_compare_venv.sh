@@ -18,9 +18,10 @@ export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/dev/shm/flowdraft_xdg_cache}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/tmp/flowdraft_hf/datasets}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-/tmp/flowdraft_hf/transformers}"
 export TMPDIR="${TMPDIR:-/dev/shm/flowdraft_tmp}"
+export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-/tmp/flowdraft_torchinductor}"
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-mkdir -p "$TMPDIR" "$HF_MODULES_CACHE" "$XDG_CACHE_HOME"
+mkdir -p "$TMPDIR" "$TORCHINDUCTOR_CACHE_DIR" "$HF_MODULES_CACHE" "$XDG_CACHE_HOME"
 
 DATA_DIR="${DATA_DIR:-/tmp/flowdraft_storage/nemotron_quick_packed}"
 EVAL_DATA_DIR="${EVAL_DATA_DIR:-/tmp/flowdraft_storage/nemotron_quick_eval_packed}"

@@ -19,7 +19,15 @@ export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/dev/shm/flowdraft_xdg_cache}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$JOB_CACHE_DIR/hf/datasets}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$JOB_CACHE_DIR/hf/transformers}"
 export TMPDIR="${TMPDIR:-/dev/shm/flowdraft_tmp}"
-mkdir -p "$JOB_CACHE_DIR" "$HF_HOME" "$HF_MODULES_CACHE" "$XDG_CACHE_HOME" "$TMPDIR" outputs
+export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-/tmp/flowdraft_torchinductor}"
+mkdir -p \
+  "$JOB_CACHE_DIR" \
+  "$HF_HOME" \
+  "$HF_MODULES_CACHE" \
+  "$XDG_CACHE_HOME" \
+  "$TMPDIR" \
+  "$TORCHINDUCTOR_CACHE_DIR" \
+  outputs
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 OUT_DIR="${OUT_DIR:-/dev/shm/flowdraft_runs/flowdraft_hardce_quick2h}"
