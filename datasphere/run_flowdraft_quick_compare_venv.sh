@@ -29,8 +29,12 @@ MAX_SEQUENCES="${MAX_SEQUENCES:-20000}"
 EVAL_SEQUENCES="${EVAL_SEQUENCES:-512}"
 MAX_STEPS="${MAX_STEPS:-600}"
 EPOCHS="${EPOCHS:-1}"
+NUM_ANCHOR_BLOCKS="${NUM_ANCHOR_BLOCKS:-32}"
+GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-32}"
 SAVE_EVERY="${SAVE_EVERY:-100}"
 EVAL_EVERY="${EVAL_EVERY:-100}"
+EVAL_BATCHES="${EVAL_BATCHES:-32}"
+TRAIN_ATTN_IMPLEMENTATION="${TRAIN_ATTN_IMPLEMENTATION:-sdpa}"
 BENCH_TOKENS="${BENCH_TOKENS:-128}"
 BENCH_DTYPE="${BENCH_DTYPE:-bf16}"
 BENCH_ATTN_IMPLEMENTATION="${BENCH_ATTN_IMPLEMENTATION:-sdpa}"
@@ -111,8 +115,12 @@ log "Training quick FlowDraft checkpoint at ${OUT_DIR}"
   --output-dir "$OUT_DIR" \
   --max-steps "$MAX_STEPS" \
   --epochs "$EPOCHS" \
+  --num-anchor-blocks "$NUM_ANCHOR_BLOCKS" \
+  --gradient-accumulation-steps "$GRADIENT_ACCUMULATION_STEPS" \
   --save-every "$SAVE_EVERY" \
   --eval-every "$EVAL_EVERY" \
+  --eval-batches "$EVAL_BATCHES" \
+  --attn-implementation "$TRAIN_ATTN_IMPLEMENTATION" \
   --kl-reduction "$KL_REDUCTION" \
   --flow-state-min "$FLOW_STATE_MIN" \
   --flow-state-max "$FLOW_STATE_MAX" \

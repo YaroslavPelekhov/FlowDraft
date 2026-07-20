@@ -155,6 +155,7 @@ Defaults:
 - same packed Nemotron data as the Orthrus quick run
 - `MAX_STEPS=600`
 - `block_size=32`
+- `NUM_ANCHOR_BLOCKS=32`, `GRADIENT_ACCUMULATION_STEPS=32`; on a 40GB A100, `64` and `16` preserve the effective block batch while amortizing frozen-backbone work
 - `BENCH_DTYPE=bf16`, `BENCH_ATTN_IMPLEMENTATION=sdpa` for fast smoke benchmarking
 - `BENCH_REQUIRE_PARITY=0`, set to `1` with `BENCH_DTYPE=fp32 BENCH_ATTN_IMPLEMENTATION=eager` for strict lossless checks
 - `FLOW_STATE_MIN=0.0`, `FLOW_STATE_MAX=0.0` for stage-1 one-jump teacher matching from the same fully masked state used at inference
