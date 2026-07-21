@@ -478,6 +478,19 @@ def main() -> None:
     args = merge_config(parsed_args, load_config_file(parsed_args.config), cli_keys)
     set_seed(args.seed)
 
+    if args.flow_objective == "ecld" and args.consistency_weight > 0:
+        off_diagonal_blocks = args.num_anchor_blocks - round(
+            args.num_anchor_blocks * args.diagonal_fraction
+        )
+        off_diagonal_length = off_diagonal_blocks * args.block_size
+        if off_diagonal_length <= 0 or off_diagonal_length % 128 != 0:
+            raise ValueError(
+                "ECLD off-diagonal diffusion length must be a positive multiple of 128 "
+                "for the upstream FlexAttention kernel; got "
+                f"({args.num_anchor_blocks} - round({args.num_anchor_blocks} * "
+                f"{args.diagonal_fraction})) * {args.block_size} = {off_diagonal_length}."
+            )
+
     if not torch.cuda.is_available():
         raise RuntimeError("This training loop expects a CUDA GPU with FlexAttention support.")
 
