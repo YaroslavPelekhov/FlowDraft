@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from typing import Iterable
 
 import torch
+from safetensors.torch import load_file
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 
@@ -91,6 +93,48 @@ def build_orthrus_from_qwen(
 
     del base
     return orthrus, {"missing": missing, "unexpected": unexpected}
+
+
+def load_flowdraft_adapter(
+    checkpoint_dir: str | Path,
+    upstream_dir: str | Path,
+    dtype: torch.dtype,
+    attn_implementation: str,
+):
+    """Reconstruct a frozen Orthrus model and load a trainable-only FlowDraft checkpoint."""
+
+    checkpoint_dir = Path(checkpoint_dir)
+    with (checkpoint_dir / "adapter_config.json").open("r", encoding="utf-8") as handle:
+        metadata = json.load(handle)
+    if metadata.get("format") != "flowdraft_trainable_v1":
+        raise ValueError(f"Unsupported adapter format: {metadata.get('format')}")
+
+    model, load_info = build_orthrus_from_qwen(
+        base_model_name_or_path=metadata["base_model"],
+        upstream_dir=upstream_dir,
+        block_size=int(metadata["block_size"]),
+        mask_token_id=int(metadata["mask_token_id"]),
+        dtype=dtype,
+        attn_implementation=attn_implementation,
+    )
+    adapter_state = load_file(checkpoint_dir / "adapter_model.safetensors")
+    missing, unexpected = model.load_state_dict(adapter_state, strict=False)
+    unexpected = [name for name in unexpected if name not in load_info.get("unexpected", [])]
+    if unexpected:
+        raise ValueError(f"Unexpected adapter weights: {unexpected}")
+    expected_names = set(metadata.get("trainable_parameter_names", []))
+    if expected_names and expected_names != set(adapter_state):
+        raise ValueError("Adapter weight names do not match adapter_config.json")
+
+    for key in (
+        "flowdraft_cfm",
+        "flowdraft_objective",
+        "flowdraft_time_conditioning_scale",
+        "flowdraft_endpoint_topk",
+    ):
+        if key in metadata:
+            setattr(model.config, key, metadata[key])
+    return model, metadata, {"base": load_info, "adapter_missing": missing}
 
 
 def initialize_diffusion_from_ar(model: torch.nn.Module) -> None:

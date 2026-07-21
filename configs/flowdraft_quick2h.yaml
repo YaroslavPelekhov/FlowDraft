@@ -43,6 +43,7 @@ eval_anchor_blocks: 8
 eval_seed: 1701
 best_metric: eval_greedy_prefix_acceptance
 save_every: 100
+checkpoint_format: trainable
 save_trainer_state: false
 gradient_checkpointing: false
 compile: false

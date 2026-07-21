@@ -46,6 +46,7 @@ from orthrus_training.flowdraft import (
     topk_endpoint_embeddings,
     transport_categorical_state,
 )
+from orthrus_training.modeling import load_flowdraft_adapter, load_tokenizer
 
 
 PAPER_GREEDY_TARGETS = {
@@ -64,6 +65,7 @@ PAPER_GREEDY_TARGETS = {
 def parse_args():
     parser = argparse.ArgumentParser(description="Benchmark AR vs FlowDraft greedy lossless decoding.")
     parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--upstream-dir", default="upstream_orthrus")
     parser.add_argument("--prompts-jsonl", default="eval_prompts/quick_compare.jsonl")
     parser.add_argument("--output-jsonl", default=None)
     parser.add_argument("--summary-json", default=None)
@@ -327,14 +329,25 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16 if args.dtype.lower() in {"bf16", "bfloat16"} and device.type == "cuda" else torch.float32
 
-    tokenizer = AutoTokenizer.from_pretrained(args.checkpoint, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        args.checkpoint,
-        dtype=dtype,
-        device_map=str(device),
-        attn_implementation=args.attn_implementation,
-        trust_remote_code=True,
-    ).eval()
+    checkpoint_path = Path(args.checkpoint)
+    if (checkpoint_path / "adapter_config.json").exists():
+        model, adapter_metadata, _ = load_flowdraft_adapter(
+            checkpoint_path,
+            upstream_dir=args.upstream_dir,
+            dtype=dtype,
+            attn_implementation=args.attn_implementation,
+        )
+        tokenizer = load_tokenizer(adapter_metadata["base_model"])
+        model = model.to(device=device, dtype=dtype).eval()
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.checkpoint, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            args.checkpoint,
+            dtype=dtype,
+            device_map=str(device),
+            attn_implementation=args.attn_implementation,
+            trust_remote_code=True,
+        ).eval()
 
     rows = []
     prompts = load_prompts(args.prompts_jsonl)

@@ -16,7 +16,11 @@ from transformers import get_cosine_schedule_with_warmup, set_seed
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from orthrus_training.checkpointing import save_orthrus_checkpoint, save_training_state
+from orthrus_training.checkpointing import (
+    save_orthrus_checkpoint,
+    save_trainable_checkpoint,
+    save_training_state,
+)
 from orthrus_training.data import (
     PackedTokenDataset,
     assert_disjoint_packed_manifests,
@@ -103,6 +107,7 @@ def parse_args():
         default="eval_greedy_prefix_acceptance",
     )
     parser.add_argument("--save-every", type=int, default=100)
+    parser.add_argument("--checkpoint-format", choices=["trainable", "full"], default="trainable")
     parser.add_argument("--save-final", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-trainer-state", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=False)
@@ -471,6 +476,13 @@ def write_json(path: Path, payload: dict) -> None:
     with path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, sort_keys=True)
         f.write("\n")
+
+
+def save_model_checkpoint(model, tokenizer, output_dir: Path, args) -> None:
+    if args.checkpoint_format == "trainable":
+        save_trainable_checkpoint(model, output_dir, args.base_model)
+    else:
+        save_orthrus_checkpoint(model, tokenizer, output_dir, args.upstream_dir)
 
 
 def main() -> None:
@@ -844,7 +856,7 @@ def main() -> None:
                             best_eval_loss = eval_record["eval_loss"]
                             best_step = global_step
                             best_eval_top1 = eval_record["eval_top1"]
-                            save_orthrus_checkpoint(model, tokenizer, output_dir / "best", args.upstream_dir)
+                            save_model_checkpoint(model, tokenizer, output_dir / "best", args)
                             write_json(
                                 output_dir / "best_metrics.json",
                                 {
@@ -867,7 +879,7 @@ def main() -> None:
 
                     if args.save_every > 0 and global_step % args.save_every == 0:
                         last_dir = output_dir / "last"
-                        save_orthrus_checkpoint(model, tokenizer, last_dir, args.upstream_dir)
+                        save_model_checkpoint(model, tokenizer, last_dir, args)
                         write_json(
                             output_dir / "last_metrics.json",
                             {
@@ -893,7 +905,7 @@ def main() -> None:
 
         progress.close()
         if args.save_final:
-            save_orthrus_checkpoint(model, tokenizer, output_dir / "last", args.upstream_dir)
+            save_model_checkpoint(model, tokenizer, output_dir / "last", args)
             write_json(
                 output_dir / "last_metrics.json",
                 {
