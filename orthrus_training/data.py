@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,6 +58,35 @@ class PackedTokenDataset(Dataset):
                 raise ValueError(f"Shard shape mismatch for {shard.path}: {arr.shape}")
             self._arrays[shard_idx] = arr
         return arr
+
+
+def packed_sequence_hashes(manifest_path: str | Path) -> set[bytes]:
+    """Hash every packed row without loading complete shards into memory."""
+
+    dataset = PackedTokenDataset(manifest_path)
+    hashes: set[bytes] = set()
+    for shard_idx, shard in enumerate(dataset.shards):
+        array = dataset._array(shard_idx)
+        for row in array:
+            hashes.add(hashlib.blake2b(memoryview(row), digest_size=16).digest())
+    return hashes
+
+
+def assert_disjoint_packed_manifests(
+    train_manifest: str | Path,
+    eval_manifest: str | Path,
+) -> tuple[int, int]:
+    """Fail fast when fixed packed sequences leak from training into eval."""
+
+    train_hashes = packed_sequence_hashes(train_manifest)
+    eval_hashes = packed_sequence_hashes(eval_manifest)
+    overlap = train_hashes & eval_hashes
+    if overlap:
+        raise ValueError(
+            f"Train/eval leakage: found {len(overlap)} identical packed sequences. "
+            "Rebuild eval data with --skip-sequences set past the training range."
+        )
+    return len(train_hashes), len(eval_hashes)
 
 
 def sample_anchor_positions(

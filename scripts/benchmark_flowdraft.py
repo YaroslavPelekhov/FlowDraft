@@ -40,7 +40,25 @@ from transformers.cache_utils import DynamicCache
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from orthrus_training.flowdraft import make_discrete_flowdraft_state
+from orthrus_training.flowdraft import (
+    add_flow_time_conditioning,
+    make_discrete_flowdraft_state,
+    topk_endpoint_embeddings,
+    transport_categorical_state,
+)
+
+
+PAPER_GREEDY_TARGETS = {
+    "gsm8k": {"tpf": 4.20, "speedup": 4.37},
+    "math500": {"tpf": 4.71, "speedup": 4.74},
+    "aime24": {"tpf": 4.33, "speedup": 5.65},
+    "aime25": {"tpf": 3.89, "speedup": 4.80},
+    "humaneval": {"tpf": 2.75, "speedup": 3.07},
+    "mbpp": {"tpf": 2.76, "speedup": 3.07},
+    "pseudo2code": {"tpf": 4.60, "speedup": 4.90},
+    "livecodebench_v5": {"tpf": 3.86, "speedup": 5.87},
+    "average": {"tpf": 3.89, "speedup": 4.25},
+}
 
 
 def parse_args():
@@ -54,8 +72,9 @@ def parse_args():
     parser.add_argument("--warmup-prompts", type=int, default=1)
     parser.add_argument("--attn-implementation", default="sdpa")
     parser.add_argument("--dtype", default="bf16")
-    parser.add_argument("--paper-speedup-target", type=float, default=4.25)
-    parser.add_argument("--paper-tpf-target", type=float, default=3.89)
+    parser.add_argument("--benchmark-task", choices=sorted(PAPER_GREEDY_TARGETS), default=None)
+    parser.add_argument("--paper-speedup-target", type=float, default=None)
+    parser.add_argument("--paper-tpf-target", type=float, default=None)
     parser.add_argument("--require-parity", action="store_true")
     return parser.parse_args()
 
@@ -90,6 +109,11 @@ def sample_greedy(logits: torch.Tensor) -> torch.Tensor:
     return logits.argmax(dim=-1)
 
 
+def synchronize(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
 def first_mismatch(a: torch.Tensor, b: torch.Tensor) -> int | None:
     min_len = min(a.shape[1], b.shape[1])
     mismatch = (a[:, :min_len] != b[:, :min_len]).nonzero()
@@ -106,6 +130,7 @@ def generate_ar_greedy(model, input_ids: torch.Tensor, max_new_tokens: int, eos_
     output_ids = [input_ids]
     position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
 
+    synchronize(input_ids.device)
     start = time.perf_counter()
     outputs = model(input_ids=input_ids, position_ids=position_ids, past_key_values=past_key_values, use_cache=True)
     forward_passes = 1
@@ -128,6 +153,7 @@ def generate_ar_greedy(model, input_ids: torch.Tensor, max_new_tokens: int, eos_
         forward_passes += 1
         next_token = sample_greedy(outputs.logits[:, -1, :])
 
+    synchronize(input_ids.device)
     elapsed = time.perf_counter() - start
     return torch.cat(output_ids + generated, dim=1), elapsed, forward_passes
 
@@ -149,6 +175,7 @@ def generate_flowdraft_greedy(
     output_ids = torch.full((1, max_length + block_size), mask_token_id, dtype=torch.long, device=device)
     output_ids[:, : input_ids.shape[1]] = input_ids
 
+    synchronize(device)
     start = time.perf_counter()
     position_ids = torch.arange(input_ids.shape[1], device=device).unsqueeze(0)
     outputs = model(input_ids=input_ids, position_ids=position_ids, past_key_values=past_key_values)
@@ -161,6 +188,7 @@ def generate_flowdraft_greedy(
     acceptance_lengths: list[int] = []
 
     if eos_token_id is not None and int(next_token.item()) == int(eos_token_id):
+        synchronize(device)
         return output_ids[:, : start_idx + 1], time.perf_counter() - start, forward_passes, acceptance_lengths
 
     while generated_count < max_new_tokens and start_idx < max_length - 1:
@@ -168,25 +196,72 @@ def generate_flowdraft_greedy(
         diff_position_ids = torch.arange(start_idx, start_idx + diff_len, device=device).unsqueeze(0)
         draft_tokens = None
         state_ids = None
+        raw_state_embeds = None
+        use_cfm = bool(getattr(model.config, "flowdraft_cfm", False))
+        time_scale = float(getattr(model.config, "flowdraft_time_conditioning_scale", 0.0))
+        endpoint_topk = int(getattr(model.config, "flowdraft_endpoint_topk", 32))
 
-        for _ in range(max(1, flow_steps)):
-            state_ids = make_discrete_flowdraft_state(
-                anchor_token_ids=output_ids[:, start_idx : start_idx + 1],
-                draft_token_ids=draft_tokens,
-                diff_len=diff_len,
-                mask_token_id=mask_token_id,
-            )
-            diff_outputs = model(
-                input_ids=state_ids,
-                position_ids=diff_position_ids,
-                past_key_values=past_key_values,
-                use_cache=False,
-                is_diffusion_pass=True,
-                ar_seq_len=start_idx,
-            )
+        for flow_index in range(max(1, flow_steps)):
+            if use_cfm:
+                if raw_state_embeds is None:
+                    state_ids = make_discrete_flowdraft_state(
+                        anchor_token_ids=output_ids[:, start_idx : start_idx + 1],
+                        draft_token_ids=None,
+                        diff_len=diff_len,
+                        mask_token_id=mask_token_id,
+                    )
+                    raw_state_embeds = model.model.embed_tokens(state_ids)
+                source_time_value = flow_index / max(1, flow_steps)
+                target_time_value = (flow_index + 1) / max(1, flow_steps)
+                source_time = torch.full((1, 1, 1, 1), source_time_value, device=device)
+                target_time = torch.full((1, 1, 1, 1), target_time_value, device=device)
+                conditioned = add_flow_time_conditioning(
+                    raw_state_embeds,
+                    source_time,
+                    target_time,
+                    block_size=diff_len,
+                    scale=time_scale,
+                )
+                diff_outputs = model(
+                    inputs_embeds=conditioned,
+                    position_ids=diff_position_ids,
+                    past_key_values=past_key_values,
+                    use_cache=False,
+                    is_diffusion_pass=True,
+                    ar_seq_len=start_idx,
+                )
+            else:
+                state_ids = make_discrete_flowdraft_state(
+                    anchor_token_ids=output_ids[:, start_idx : start_idx + 1],
+                    draft_token_ids=draft_tokens,
+                    diff_len=diff_len,
+                    mask_token_id=mask_token_id,
+                )
+                diff_outputs = model(
+                    input_ids=state_ids,
+                    position_ids=diff_position_ids,
+                    past_key_values=past_key_values,
+                    use_cache=False,
+                    is_diffusion_pass=True,
+                    ar_seq_len=start_idx,
+                )
             forward_passes += 1
             if diff_len > 1:
-                draft_tokens = sample_greedy(diff_outputs.logits[:, :-1, :])
+                endpoint_logits = diff_outputs.logits[:, :-1, :]
+                draft_tokens = sample_greedy(endpoint_logits)
+                if use_cfm and flow_index + 1 < max(1, flow_steps):
+                    endpoint_embeds = topk_endpoint_embeddings(
+                        endpoint_logits,
+                        model.model.embed_tokens.weight,
+                        topk=endpoint_topk,
+                    )
+                    transported = transport_categorical_state(
+                        raw_state_embeds[:, 1:, :],
+                        endpoint_embeds,
+                        source_time.squeeze(-1),
+                        target_time.squeeze(-1),
+                    )
+                    raw_state_embeds = torch.cat([raw_state_embeds[:, :1, :], transported], dim=1)
             else:
                 draft_tokens = torch.empty((1, 0), dtype=torch.long, device=device)
 
@@ -219,6 +294,7 @@ def generate_flowdraft_greedy(
         if len(eos_positions) > 0:
             eos_offset = int(eos_positions[0, -1].item())
             output_ids[:, start_idx : start_idx + eos_offset + 1] = accepted_block[:, : eos_offset + 1]
+            synchronize(device)
             return output_ids[:, : start_idx + eos_offset + 1], time.perf_counter() - start, forward_passes, acceptance_lengths
 
         output_ids[:, start_idx:end_idx] = accepted_block
@@ -230,8 +306,10 @@ def generate_flowdraft_greedy(
             output_ids[:, start_idx] = next_token
             generated_count += 1
             if eos_token_id is not None and int(next_token.item()) == int(eos_token_id):
+                synchronize(device)
                 return output_ids[:, : start_idx + 1], time.perf_counter() - start, forward_passes, acceptance_lengths
 
+    synchronize(device)
     elapsed = time.perf_counter() - start
     return output_ids[:, :max_length], elapsed, forward_passes, acceptance_lengths
 
@@ -302,6 +380,8 @@ def main() -> None:
             "acceptance_p50": percentile([float(x) for x in acceptance], 0.50),
             "acceptance_p90": percentile([float(x) for x in acceptance], 0.90),
             "acceptance_cycles": len(acceptance),
+            "acceptance_sum": sum(acceptance),
+            "reached_max_new_tokens": ar_new >= args.max_new_tokens,
         }
         rows.append(record)
         print(json.dumps(record, ensure_ascii=False), flush=True)
@@ -311,30 +391,65 @@ def main() -> None:
             for row in rows:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
+    inferred_tasks = {str(row.get("task", "")).lower() for row in prompts if row.get("task")}
+    benchmark_task = args.benchmark_task
+    if benchmark_task is None and len(inferred_tasks) == 1:
+        candidate = inferred_tasks.pop().replace("-", "_")
+        benchmark_task = candidate if candidate in PAPER_GREEDY_TARGETS else None
+    paper_targets = PAPER_GREEDY_TARGETS.get(benchmark_task, {})
+    paper_speedup_target = args.paper_speedup_target
+    paper_tpf_target = args.paper_tpf_target
+    if paper_speedup_target is None:
+        paper_speedup_target = paper_targets.get("speedup")
+    if paper_tpf_target is None:
+        paper_tpf_target = paper_targets.get("tpf")
+
+    total_ar_tokens = sum(row["ar_tokens"] for row in rows)
+    total_flow_tokens = sum(row["flowdraft_tokens"] for row in rows)
+    total_ar_seconds = sum(row["ar_seconds"] for row in rows)
+    total_flow_seconds = sum(row["flowdraft_seconds"] for row in rows)
+    total_flow_forwards = sum(row["flowdraft_forward_passes"] for row in rows)
+    total_acceptance_cycles = sum(row["acceptance_cycles"] for row in rows)
+    total_accepted_tokens = sum(row["acceptance_sum"] for row in rows)
+
     summary = {
         "num_prompts": len(rows),
+        "benchmark_task": benchmark_task,
         "flow_steps": args.flow_steps,
         "dtype": args.dtype,
         "attn_implementation": args.attn_implementation,
         "parity_rate": sum(1 for row in rows if row["parity_ok"]) / len(rows) if rows else 0.0,
-        "mean_speedup": statistics.mean(row["speedup"] for row in rows) if rows else 0.0,
+        "aggregate_speedup": (
+            (total_flow_tokens / total_flow_seconds) / (total_ar_tokens / total_ar_seconds)
+            if total_ar_tokens and total_flow_tokens and total_ar_seconds > 0 and total_flow_seconds > 0
+            else 0.0
+        ),
+        "prompt_mean_speedup": statistics.mean(row["speedup"] for row in rows) if rows else 0.0,
         "mean_ar_tokens_per_sec": statistics.mean(row["ar_tokens_per_sec"] for row in rows) if rows else 0.0,
         "mean_flowdraft_tokens_per_sec": statistics.mean(row["flowdraft_tokens_per_sec"] for row in rows) if rows else 0.0,
-        "mean_flowdraft_tpf": statistics.mean(row["flowdraft_tpf"] for row in rows) if rows else 0.0,
-        "mean_acceptance": statistics.mean(row["acceptance_mean"] for row in rows) if rows else 0.0,
+        "aggregate_flowdraft_tpf": total_flow_tokens / total_flow_forwards if total_flow_forwards else 0.0,
+        "prompt_mean_flowdraft_tpf": statistics.mean(row["flowdraft_tpf"] for row in rows) if rows else 0.0,
+        "weighted_mean_acceptance": (
+            total_accepted_tokens / total_acceptance_cycles if total_acceptance_cycles else 0.0
+        ),
+        "prompt_mean_acceptance": statistics.mean(row["acceptance_mean"] for row in rows) if rows else 0.0,
         "p50_acceptance": percentile([row["acceptance_p50"] for row in rows], 0.50),
         "p90_acceptance": percentile([row["acceptance_p90"] for row in rows], 0.90),
-        "paper_speedup_target": args.paper_speedup_target,
-        "paper_tpf_target": args.paper_tpf_target,
+        "total_ar_tokens": total_ar_tokens,
+        "total_flowdraft_tokens": total_flow_tokens,
+        "total_ar_seconds": total_ar_seconds,
+        "total_flowdraft_seconds": total_flow_seconds,
+        "total_flowdraft_forward_passes": total_flow_forwards,
+        "num_reached_max_new_tokens": sum(row["reached_max_new_tokens"] for row in rows),
+        "paper_speedup_target": paper_speedup_target,
+        "paper_tpf_target": paper_tpf_target,
     }
-    summary["speedup_vs_paper_target"] = (
-        summary["mean_speedup"] / args.paper_speedup_target if args.paper_speedup_target > 0 else 0.0
-    )
-    summary["tpf_vs_paper_target"] = (
-        summary["mean_flowdraft_tpf"] / args.paper_tpf_target if args.paper_tpf_target > 0 else 0.0
-    )
-    summary["speedup_gap_to_paper_target"] = args.paper_speedup_target - summary["mean_speedup"]
-    summary["tpf_gap_to_paper_target"] = args.paper_tpf_target - summary["mean_flowdraft_tpf"]
+    if paper_speedup_target is not None:
+        summary["speedup_vs_paper_target"] = summary["aggregate_speedup"] / paper_speedup_target
+        summary["speedup_gap_to_paper_target"] = paper_speedup_target - summary["aggregate_speedup"]
+    if paper_tpf_target is not None:
+        summary["tpf_vs_paper_target"] = summary["aggregate_flowdraft_tpf"] / paper_tpf_target
+        summary["tpf_gap_to_paper_target"] = paper_tpf_target - summary["aggregate_flowdraft_tpf"]
     print("SUMMARY " + json.dumps(summary, ensure_ascii=False), flush=True)
 
     if args.summary_json:

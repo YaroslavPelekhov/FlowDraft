@@ -28,6 +28,7 @@ EVAL_DATA_DIR="${EVAL_DATA_DIR:-/tmp/flowdraft_storage/nemotron_quick_eval_packe
 OUT_DIR="${OUT_DIR:-/dev/shm/flowdraft_runs/flowdraft_quick2h}"
 MAX_SEQUENCES="${MAX_SEQUENCES:-20000}"
 EVAL_SEQUENCES="${EVAL_SEQUENCES:-512}"
+EVAL_SKIP_SEQUENCES="${EVAL_SKIP_SEQUENCES:-$MAX_SEQUENCES}"
 MAX_STEPS="${MAX_STEPS:-600}"
 EPOCHS="${EPOCHS:-1}"
 NUM_ANCHOR_BLOCKS="${NUM_ANCHOR_BLOCKS:-32}"
@@ -43,13 +44,19 @@ BENCH_REQUIRE_PARITY="${BENCH_REQUIRE_PARITY:-0}"
 FLOW_STEPS="${FLOW_STEPS:-1}"
 FLOW_STATE_MIN="${FLOW_STATE_MIN:-0.0}"
 FLOW_STATE_MAX="${FLOW_STATE_MAX:-0.0}"
+FLOW_OBJECTIVE="${FLOW_OBJECTIVE:-ecld}"
+DIAGONAL_FRACTION="${DIAGONAL_FRACTION:-0.75}"
+FLOW_TIME_CONDITIONING_SCALE="${FLOW_TIME_CONDITIONING_SCALE:-0.05}"
+ENDPOINT_TOPK="${ENDPOINT_TOPK:-32}"
+TEMPORAL_DIFFERENCE_EPSILON="${TEMPORAL_DIFFERENCE_EPSILON:-0.02}"
+TEMPORAL_DRIFT_WEIGHT="${TEMPORAL_DRIFT_WEIGHT:-1.0}"
 KL_REDUCTION="${KL_REDUCTION:-tokenmean}"
-HARD_CE_WEIGHT="${HARD_CE_WEIGHT:-0.5}"
-PREFIX_LOSS_WEIGHT="${PREFIX_LOSS_WEIGHT:-1.0}"
+HARD_CE_WEIGHT="${HARD_CE_WEIGHT:-0.1}"
+PREFIX_LOSS_WEIGHT="${PREFIX_LOSS_WEIGHT:-0.25}"
 PREFIX_KL_WEIGHT="${PREFIX_KL_WEIGHT:-0.5}"
 PREFIX_WEIGHT_DECAY="${PREFIX_WEIGHT_DECAY:-0.9}"
-CONSISTENCY_WEIGHT="${CONSISTENCY_WEIGHT:-0.0}"
-CONSISTENCY_START_STEP="${CONSISTENCY_START_STEP:-10000}"
+CONSISTENCY_WEIGHT="${CONSISTENCY_WEIGHT:-0.1}"
+CONSISTENCY_START_STEP="${CONSISTENCY_START_STEP:-200}"
 REBUILD_DATA="${REBUILD_DATA:-0}"
 CLEAN_OUTPUT="${CLEAN_OUTPUT:-0}"
 BENCH_PARITY_ARGS=()
@@ -94,18 +101,32 @@ else
   log "Reusing packed training data at ${DATA_DIR}"
 fi
 
-if [ "$REBUILD_DATA" = "1" ] || [ ! -f "$EVAL_DATA_DIR/manifest.json" ]; then
-  log "Preparing ${EVAL_SEQUENCES} eval packed sequences at ${EVAL_DATA_DIR}"
+EVAL_DATA_VALID=0
+if [ -f "$EVAL_DATA_DIR/manifest.json" ]; then
+  EVAL_DATA_VALID="$($PYTHON_BIN - "$EVAL_DATA_DIR/manifest.json" "$EVAL_SKIP_SEQUENCES" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    manifest = json.load(handle)
+print(int(manifest.get("skip_sequences", 0) == int(sys.argv[2])))
+PY
+)"
+fi
+
+if [ "$REBUILD_DATA" = "1" ] || [ "$EVAL_DATA_VALID" != "1" ]; then
+  log "Preparing ${EVAL_SEQUENCES} held-out eval sequences after skipping ${EVAL_SKIP_SEQUENCES}"
+  rm -rf "$EVAL_DATA_DIR"
   "$PYTHON_BIN" scripts/prepare_dataset.py \
     --dataset-name nvidia/Nemotron-Post-Training-Dataset-v2 \
     --dataset-config default \
     --splits chat math code \
     --output-dir "$EVAL_DATA_DIR" \
     --seq-len 2048 \
+    --skip-sequences "$EVAL_SKIP_SEQUENCES" \
     --max-sequences "$EVAL_SEQUENCES" \
     --shard-size 512
 else
-  log "Reusing packed eval data at ${EVAL_DATA_DIR}"
+  log "Reusing non-overlapping packed eval data at ${EVAL_DATA_DIR}"
 fi
 
 log "Training quick FlowDraft checkpoint at ${OUT_DIR}"
@@ -125,6 +146,12 @@ log "Training quick FlowDraft checkpoint at ${OUT_DIR}"
   --kl-reduction "$KL_REDUCTION" \
   --flow-state-min "$FLOW_STATE_MIN" \
   --flow-state-max "$FLOW_STATE_MAX" \
+  --flow-objective "$FLOW_OBJECTIVE" \
+  --diagonal-fraction "$DIAGONAL_FRACTION" \
+  --flow-time-conditioning-scale "$FLOW_TIME_CONDITIONING_SCALE" \
+  --endpoint-topk "$ENDPOINT_TOPK" \
+  --temporal-difference-epsilon "$TEMPORAL_DIFFERENCE_EPSILON" \
+  --temporal-drift-weight "$TEMPORAL_DRIFT_WEIGHT" \
   --hard-ce-weight "$HARD_CE_WEIGHT" \
   --prefix-loss-weight "$PREFIX_LOSS_WEIGHT" \
   --prefix-kl-weight "$PREFIX_KL_WEIGHT" \

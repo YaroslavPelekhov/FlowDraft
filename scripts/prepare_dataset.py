@@ -27,6 +27,12 @@ def parse_args():
     parser.add_argument("--output-dir", default="data/packed_qwen3_1p7b")
     parser.add_argument("--seq-len", type=int, default=2048)
     parser.add_argument("--max-sequences", type=int, default=50000)
+    parser.add_argument(
+        "--skip-sequences",
+        type=int,
+        default=0,
+        help="Discard this many packed sequences before writing output (for deterministic holdouts).",
+    )
     parser.add_argument("--shard-size", type=int, default=1024)
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--streaming", action=argparse.BooleanOptionalAction, default=True)
@@ -116,6 +122,8 @@ def main() -> None:
         "category_field": args.category_field,
         "model_name": args.model_name,
         "seq_len": args.seq_len,
+        "skip_sequences": args.skip_sequences,
+        "seed": args.seed,
         "shards": [],
     }
 
@@ -123,6 +131,7 @@ def main() -> None:
     rows: list[np.ndarray] = []
     shard_idx = 0
     produced = 0
+    skipped = 0
     split_cursor = 0
 
     progress = tqdm(total=args.max_sequences, desc="packed sequences")
@@ -137,8 +146,14 @@ def main() -> None:
         buffer.extend(token_ids)
 
         while len(buffer) >= args.seq_len and produced < args.max_sequences:
-            rows.append(np.asarray(buffer[: args.seq_len], dtype=np.int32))
+            packed = np.asarray(buffer[: args.seq_len], dtype=np.int32)
             del buffer[: args.seq_len]
+
+            if skipped < args.skip_sequences:
+                skipped += 1
+                continue
+
+            rows.append(packed)
             produced += 1
             progress.update(1)
 
@@ -153,6 +168,7 @@ def main() -> None:
     progress.close()
     manifest["num_sequences"] = produced
     manifest["num_tokens"] = produced * args.seq_len
+    manifest["source_packed_sequences_consumed"] = skipped + produced
     with (output_dir / "manifest.json").open("w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, sort_keys=True)
         f.write("\n")

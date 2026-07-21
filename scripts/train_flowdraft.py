@@ -17,12 +17,21 @@ from transformers import get_cosine_schedule_with_warmup, set_seed
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from orthrus_training.checkpointing import save_orthrus_checkpoint, save_training_state
-from orthrus_training.data import PackedTokenDataset, sample_anchor_positions
+from orthrus_training.data import (
+    PackedTokenDataset,
+    assert_disjoint_packed_manifests,
+    sample_anchor_positions,
+)
 from orthrus_training.flowdraft import (
+    add_flow_time_conditioning,
+    flow_map_step_size,
     make_flowdraft_batch,
     make_flowdraft_inputs_embeds,
+    sample_cfm_time_pairs,
     sample_flow_state_mix,
     select_endpoint_logits,
+    topk_endpoint_embeddings,
+    transport_categorical_state,
 )
 from orthrus_training.losses import (
     forward_kl_distillation,
@@ -47,6 +56,7 @@ def parse_args():
     parser.add_argument("--base-model", default="Qwen/Qwen3-1.7B")
     parser.add_argument("--train-manifest", default="data/packed_qwen3_1p7b/manifest.json")
     parser.add_argument("--eval-manifest", default=None)
+    parser.add_argument("--allow-eval-overlap", action="store_true")
     parser.add_argument("--output-dir", default="/dev/shm/flowdraft_runs/flowdraft_quick2h")
     parser.add_argument("--block-size", type=int, default=32)
     parser.add_argument("--mask-token-id", type=int, default=151669)
@@ -65,6 +75,15 @@ def parse_args():
     parser.add_argument("--kl-reduction", choices=["batchmean", "tokenmean"], default="batchmean")
     parser.add_argument("--flow-state-min", type=float, default=0.0)
     parser.add_argument("--flow-state-max", type=float, default=0.5)
+    parser.add_argument("--flow-objective", choices=["legacy", "ecld"], default="ecld")
+    parser.add_argument("--diagonal-fraction", type=float, default=0.75)
+    parser.add_argument("--flow-time-logit-mean", type=float, default=-0.4)
+    parser.add_argument("--flow-time-logit-std", type=float, default=1.0)
+    parser.add_argument("--flow-time-max", type=float, default=0.95)
+    parser.add_argument("--flow-time-conditioning-scale", type=float, default=0.1)
+    parser.add_argument("--endpoint-topk", type=int, default=32)
+    parser.add_argument("--temporal-difference-epsilon", type=float, default=0.02)
+    parser.add_argument("--temporal-drift-weight", type=float, default=1.0)
     parser.add_argument("--hard-ce-weight", type=float, default=0.5)
     parser.add_argument("--prefix-loss-weight", type=float, default=0.0)
     parser.add_argument("--prefix-kl-weight", type=float, default=0.0)
@@ -123,6 +142,15 @@ def flowdraft_forward(
     state_min: float,
     state_max: float,
     device: torch.device,
+    flow_objective: str = "legacy",
+    diagonal_fraction: float = 0.75,
+    time_logit_mean: float = -0.4,
+    time_logit_std: float = 1.0,
+    time_max: float = 0.95,
+    time_conditioning_scale: float = 0.1,
+    source_time: torch.Tensor | None = None,
+    target_time: torch.Tensor | None = None,
+    force_one_jump: bool = False,
 ):
     anchors = sample_anchor_positions(
         batch_size=input_ids.shape[0],
@@ -136,19 +164,54 @@ def flowdraft_forward(
         anchors=anchors,
         block_size=block_size,
     )
-    state_mix = sample_flow_state_mix(
-        batch_size=input_ids.shape[0],
-        num_blocks=anchors.shape[1],
-        min_mix=state_min,
-        max_mix=state_max,
-        device=device,
+    diagonal_mask = torch.ones(
+        (input_ids.shape[0], anchors.shape[1]), dtype=torch.bool, device=device
     )
+    if flow_objective == "ecld":
+        if force_one_jump:
+            shape = (input_ids.shape[0], anchors.shape[1], 1, 1)
+            source_time = torch.zeros(shape, device=device)
+            target_time = torch.ones(shape, device=device)
+            diagonal_mask = torch.zeros(
+                (input_ids.shape[0], anchors.shape[1]), dtype=torch.bool, device=device
+            )
+        elif source_time is None or target_time is None:
+            source_time, target_time, diagonal_mask = sample_cfm_time_pairs(
+                batch_size=input_ids.shape[0],
+                num_blocks=anchors.shape[1],
+                diagonal_fraction=diagonal_fraction,
+                device=device,
+                logit_mean=time_logit_mean,
+                logit_std=time_logit_std,
+                max_time=time_max,
+            )
+        else:
+            diagonal_mask = torch.isclose(source_time, target_time).reshape(
+                input_ids.shape[0], anchors.shape[1]
+            )
+        state_mix = source_time
+    else:
+        state_mix = sample_flow_state_mix(
+            batch_size=input_ids.shape[0],
+            num_blocks=anchors.shape[1],
+            min_mix=state_min,
+            max_mix=state_max,
+            device=device,
+        )
     flow_inputs = make_flowdraft_inputs_embeds(
         model=model,
         clean_blocks=clean_blocks,
         mask_token_id=mask_token_id,
         state_mix=state_mix,
     )
+    if flow_objective == "ecld":
+        flow_inputs = add_flow_time_conditioning(
+            flow_inputs,
+            source_time,
+            target_time,
+            block_size=block_size,
+            scale=time_conditioning_scale,
+        )
 
     ar_outputs = model(input_ids=input_ids, use_cache=True, is_diffusion_pass=False)
     teacher_logits = gather_logits(ar_outputs.logits, teacher_positions).detach()
@@ -170,10 +233,23 @@ def flowdraft_forward(
         "position_ids": position_ids,
         "causal_limit": causal_limit,
         "past_key_values": ar_outputs.past_key_values,
+        "source_time": source_time,
+        "target_time": target_time,
+        "diagonal_mask": diagonal_mask,
     }
 
 
-def consistency_loss(
+def select_block_values(values: torch.Tensor, block_mask: torch.Tensor, block_width: int) -> torch.Tensor:
+    batch_size, num_blocks = block_mask.shape
+    tail = values.shape[2:] if values.dim() > 2 else ()
+    blocked = values.reshape(batch_size, num_blocks, block_width, *tail)
+    selected_per_batch = block_mask.sum(dim=1)
+    if not torch.all(selected_per_batch == selected_per_batch[0]):
+        raise ValueError("Each batch item must select the same number of blocks")
+    return blocked[block_mask].reshape(batch_size, int(selected_per_batch[0]), block_width, *tail)
+
+
+def ecld_consistency_loss(
     model,
     first_logits: torch.Tensor,
     clean_blocks: torch.Tensor,
@@ -184,31 +260,110 @@ def consistency_loss(
     mask_token_id: int,
     ar_seq_len: int,
     temperature: float,
-) -> torch.Tensor:
-    batch_size, num_blocks, _ = clean_blocks.shape
-    with torch.no_grad():
-        endpoint_ids = clean_blocks.clone()
-        endpoint_ids[:, :, 1:] = first_logits.argmax(dim=-1).reshape(batch_size, num_blocks, block_size - 1)
-        late_mix = torch.full((batch_size, num_blocks, 1, 1), 0.75, device=clean_blocks.device)
+    source_time: torch.Tensor,
+    target_time: torch.Tensor,
+    diagonal_mask: torch.Tensor,
+    endpoint_topk: int,
+    time_conditioning_scale: float,
+    temporal_difference_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Finite-difference ECLD on off-diagonal CFM blocks.
 
-    late_inputs = make_flowdraft_inputs_embeds(
-        model=model,
-        clean_blocks=clean_blocks,
-        mask_token_id=mask_token_id,
-        state_mix=late_mix,
-        state_token_ids=endpoint_ids,
+    The endpoint-consistency term is exact for the retained top-k simplex.
+    The temporal derivative is a centered-by-domain forward difference, which
+    avoids unsupported full-model JVPs in FlexAttention on a single A100.
+    """
+
+    off_diagonal = ~diagonal_mask
+    if not torch.any(off_diagonal):
+        zero = first_logits.new_zeros(())
+        return zero, zero, zero
+
+    batch_size = clean_blocks.shape[0]
+    off_blocks = int(off_diagonal.sum(dim=1)[0].item())
+    selected_clean = clean_blocks[off_diagonal].reshape(batch_size, off_blocks, block_size)
+    selected_positions = position_ids.reshape(batch_size, -1, block_size)[off_diagonal].reshape(
+        batch_size, off_blocks * block_size
     )
-    late_outputs = model(
-        inputs_embeds=late_inputs,
-        position_ids=position_ids,
+    selected_limits = causal_limit.reshape(batch_size, -1, block_size)[off_diagonal].reshape(
+        batch_size, off_blocks * block_size
+    )
+    selected_source = source_time[off_diagonal].reshape(batch_size, off_blocks, 1, 1)
+    selected_target = target_time[off_diagonal].reshape(batch_size, off_blocks, 1, 1)
+    selected_logits = select_block_values(first_logits, off_diagonal, block_size - 1)
+
+    source_inputs = make_flowdraft_inputs_embeds(
+        model=model,
+        clean_blocks=selected_clean,
+        mask_token_id=mask_token_id,
+        state_mix=selected_source,
+    ).reshape(batch_size, off_blocks, block_size, -1)
+    endpoint_embeds = topk_endpoint_embeddings(
+        selected_logits,
+        model.model.embed_tokens.weight,
+        topk=endpoint_topk,
+        temperature=temperature,
+    )
+    transported_draft = transport_categorical_state(
+        source_inputs[:, :, 1:, :],
+        endpoint_embeds,
+        selected_source,
+        selected_target,
+    )
+    transported_inputs = torch.cat([source_inputs[:, :, :1, :], transported_draft], dim=2)
+    transported_inputs = transported_inputs.reshape(batch_size, off_blocks * block_size, -1).detach()
+    transported_inputs = add_flow_time_conditioning(
+        transported_inputs,
+        selected_target,
+        selected_target,
+        block_size=block_size,
+        scale=time_conditioning_scale,
+    )
+
+    with torch.no_grad():
+        target_outputs = model(
+            inputs_embeds=transported_inputs,
+            position_ids=selected_positions,
+            past_key_values=past_key_values,
+            use_cache=False,
+            is_diffusion_pass=True,
+            causal_limit=selected_limits,
+            ar_seq_len=ar_seq_len,
+        )
+        target_logits = select_endpoint_logits(target_outputs.logits, block_size).reshape_as(selected_logits)
+        endpoint_targets = F.softmax(target_logits.float() / temperature, dim=-1)
+
+    endpoint_log_probs = F.log_softmax(selected_logits.float() / temperature, dim=-1)
+    endpoint_consistency = -(endpoint_targets * endpoint_log_probs).sum(dim=-1).mean() * (temperature**2)
+
+    next_target = (selected_target + temporal_difference_epsilon).clamp_max(0.999)
+    delta = (next_target - selected_target).clamp_min(1e-3)
+    next_inputs = source_inputs.reshape(batch_size, off_blocks * block_size, -1)
+    next_inputs = add_flow_time_conditioning(
+        next_inputs,
+        selected_source,
+        next_target,
+        block_size=block_size,
+        scale=time_conditioning_scale,
+    )
+    next_outputs = model(
+        inputs_embeds=next_inputs,
+        position_ids=selected_positions,
         past_key_values=past_key_values,
         use_cache=False,
         is_diffusion_pass=True,
-        causal_limit=causal_limit,
+        causal_limit=selected_limits,
         ar_seq_len=ar_seq_len,
     )
-    late_logits = select_endpoint_logits(late_outputs.logits, block_size)
-    return forward_kl_distillation(late_logits, first_logits.detach(), temperature=temperature)
+    next_logits = select_endpoint_logits(next_outputs.logits, block_size).reshape_as(selected_logits)
+    current_probs = F.softmax(selected_logits.float() / temperature, dim=-1)
+    next_probs = F.softmax(next_logits.float() / temperature, dim=-1)
+    derivative = (next_probs - current_probs) / delta
+    drift_per_token = derivative.square().sum(dim=-1)
+    gamma = flow_map_step_size(selected_source, selected_target).reshape(batch_size, off_blocks, 1)
+    temporal_drift = (gamma.square() * drift_per_token).mean()
+    combined = 4.0 * endpoint_consistency + 2.0 * temporal_drift
+    return combined, endpoint_consistency, temporal_drift
 
 
 @torch.no_grad()
@@ -223,6 +378,8 @@ def evaluate_distillation(
     kl_reduction: str,
     prefix_weight_decay: float,
     max_batches: int,
+    flow_objective: str,
+    time_conditioning_scale: float,
 ) -> dict[str, float]:
     was_training = model.training
     model.eval()
@@ -248,6 +405,9 @@ def evaluate_distillation(
             state_min=0.0,
             state_max=0.0,
             device=device,
+            flow_objective=flow_objective,
+            time_conditioning_scale=time_conditioning_scale,
+            force_one_jump=flow_objective == "ecld",
         )
         losses.append(
             float(
@@ -337,6 +497,11 @@ def main() -> None:
     )
     eval_dataloader = None
     if args.eval_manifest:
+        if not args.allow_eval_overlap:
+            train_unique, eval_unique = assert_disjoint_packed_manifests(
+                args.train_manifest, args.eval_manifest
+            )
+            print(f"data disjointness verified train_unique={train_unique} eval_unique={eval_unique}")
         eval_dataset = PackedTokenDataset(args.eval_manifest)
         eval_dataloader = DataLoader(
             eval_dataset,
@@ -359,6 +524,10 @@ def main() -> None:
     model.train()
     model.config.use_cache = True
     model.config.flowdraft_training = True
+    model.config.flowdraft_cfm = args.flow_objective == "ecld"
+    model.config.flowdraft_time_conditioning_scale = args.flow_time_conditioning_scale
+    model.config.flowdraft_endpoint_topk = args.endpoint_topk
+    model.config.flowdraft_objective = args.flow_objective
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
     if args.compile:
@@ -382,8 +551,14 @@ def main() -> None:
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
 
     metadata = vars(args) | {
-        "method": "flowdraft_prefix_cfm",
-        "objective": "endpoint_teacher_distillation_plus_prefix_survival_plus_optional_endpoint_consistency",
+        "method": "flowdraft_categorical_flow_map" if args.flow_objective == "ecld" else "flowdraft_legacy",
+        "objective": (
+            "diagonal_vfm_teacher_distillation_plus_off_diagonal_finite_difference_ecld"
+            if args.flow_objective == "ecld"
+            else "endpoint_teacher_distillation_plus_prefix_survival"
+        ),
+        "simplex_projection": f"renormalized_topk_{args.endpoint_topk}",
+        "temporal_derivative": "forward_finite_difference" if args.flow_objective == "ecld" else None,
         "total_params": total_params,
         "trainable_params": trainable_params,
         "trainable_ratio": trainable_ratio,
@@ -397,6 +572,8 @@ def main() -> None:
     running_prefix_loss = 0.0
     running_prefix_kl_loss = 0.0
     running_consistency_loss = 0.0
+    running_endpoint_consistency = 0.0
+    running_temporal_drift = 0.0
     running_acc = 0.0
     running_first_acc = 0.0
     running_first_ce = 0.0
@@ -424,20 +601,43 @@ def main() -> None:
                     state_min=args.flow_state_min,
                     state_max=args.flow_state_max,
                     device=device,
+                    flow_objective=args.flow_objective,
+                    diagonal_fraction=(
+                        args.diagonal_fraction
+                        if global_step >= args.consistency_start_step
+                        else 1.0
+                    ),
+                    time_logit_mean=args.flow_time_logit_mean,
+                    time_logit_std=args.flow_time_logit_std,
+                    time_max=args.flow_time_max,
+                    time_conditioning_scale=args.flow_time_conditioning_scale,
                 )
+
+                supervised_mask = out["diagonal_mask"] if args.flow_objective == "ecld" else torch.ones_like(
+                    out["diagonal_mask"]
+                )
+                supervised_logits = select_block_values(
+                    out["student_logits"], supervised_mask, args.block_size - 1
+                ).reshape(input_ids.shape[0], -1, out["student_logits"].shape[-1])
+                supervised_teacher = select_block_values(
+                    out["teacher_logits"], supervised_mask, args.block_size - 1
+                ).reshape_as(supervised_logits)
+                supervised_targets = select_block_values(
+                    out["target_ids"], supervised_mask, args.block_size - 1
+                ).reshape(input_ids.shape[0], -1)
                 ce_loss = forward_kl_distillation(
-                    out["student_logits"],
-                    out["teacher_logits"],
+                    supervised_logits,
+                    supervised_teacher,
                     temperature=args.temperature,
                     reduction=args.kl_reduction,
                 )
                 hard_ce_loss = F.cross_entropy(
-                    out["student_logits"].reshape(-1, out["student_logits"].shape[-1]).float(),
-                    out["target_ids"].reshape(-1),
+                    supervised_logits.reshape(-1, supervised_logits.shape[-1]).float(),
+                    supervised_targets.reshape(-1),
                 )
                 prefix_loss = prefix_survival_cross_entropy(
-                    out["student_logits"],
-                    out["target_ids"],
+                    supervised_logits,
+                    supervised_targets,
                     block_size=args.block_size,
                     decay=args.prefix_weight_decay,
                 )
@@ -450,15 +650,21 @@ def main() -> None:
                         dtype=torch.float32,
                     )
                     prefix_kl_loss = forward_kl_distillation(
-                        out["student_logits"],
-                        out["teacher_logits"],
+                        supervised_logits,
+                        supervised_teacher,
                         temperature=args.temperature,
                         weights=prefix_weights,
                         reduction=args.kl_reduction,
                     )
                 consistency = torch.zeros((), device=device)
-                if args.consistency_weight > 0 and global_step >= args.consistency_start_step:
-                    consistency = consistency_loss(
+                endpoint_consistency = torch.zeros((), device=device)
+                temporal_drift = torch.zeros((), device=device)
+                if (
+                    args.flow_objective == "ecld"
+                    and args.consistency_weight > 0
+                    and global_step >= args.consistency_start_step
+                ):
+                    consistency, endpoint_consistency, temporal_drift = ecld_consistency_loss(
                         model=model,
                         first_logits=out["student_logits"],
                         clean_blocks=out["clean_blocks"],
@@ -469,13 +675,20 @@ def main() -> None:
                         mask_token_id=args.mask_token_id,
                         ar_seq_len=input_ids.shape[1],
                         temperature=args.temperature,
+                        source_time=out["source_time"],
+                        target_time=out["target_time"],
+                        diagonal_mask=out["diagonal_mask"],
+                        endpoint_topk=args.endpoint_topk,
+                        time_conditioning_scale=args.flow_time_conditioning_scale,
+                        temporal_difference_epsilon=args.temporal_difference_epsilon,
                     )
                 loss = (
                     ce_loss
                     + args.hard_ce_weight * hard_ce_loss
                     + args.prefix_loss_weight * prefix_loss
                     + args.prefix_kl_weight * prefix_kl_loss
-                    + args.consistency_weight * consistency
+                    + args.consistency_weight
+                    * (4.0 * endpoint_consistency + 2.0 * args.temporal_drift_weight * temporal_drift)
                 )
                 (loss / args.gradient_accumulation_steps).backward()
 
@@ -485,8 +698,12 @@ def main() -> None:
                 running_prefix_loss += float(prefix_loss.detach().cpu())
                 running_prefix_kl_loss += float(prefix_kl_loss.detach().cpu())
                 running_consistency_loss += float(consistency.detach().cpu())
-                running_acc += float(token_accuracy(out["student_logits"].detach(), out["target_ids"]).cpu())
-                prefix_metrics = prefix_acceptance_metrics(out["student_logits"].detach(), out["target_ids"], args.block_size)
+                running_endpoint_consistency += float(endpoint_consistency.detach().cpu())
+                running_temporal_drift += float(temporal_drift.detach().cpu())
+                running_acc += float(token_accuracy(supervised_logits.detach(), supervised_targets).cpu())
+                prefix_metrics = prefix_acceptance_metrics(
+                    supervised_logits.detach(), supervised_targets, args.block_size
+                )
                 running_first_acc += float(prefix_metrics["first_token_acc"].cpu())
                 running_first_ce += float(prefix_metrics["first_token_ce"].cpu())
                 running_greedy_prefix_acceptance += float(prefix_metrics["greedy_prefix_acceptance"].cpu())
@@ -511,6 +728,8 @@ def main() -> None:
                         avg_prefix = running_prefix_loss / denom
                         avg_prefix_kl = running_prefix_kl_loss / denom
                         avg_consistency = running_consistency_loss / denom
+                        avg_endpoint_consistency = running_endpoint_consistency / denom
+                        avg_temporal_drift = running_temporal_drift / denom
                         avg_acc = running_acc / denom
                         avg_first_acc = running_first_acc / denom
                         avg_first_ce = running_first_ce / denom
@@ -532,6 +751,8 @@ def main() -> None:
                             "prefix_kl_weight": args.prefix_kl_weight,
                             "prefix_weight_decay": args.prefix_weight_decay,
                             "consistency_loss": avg_consistency,
+                            "endpoint_consistency_ce": avg_endpoint_consistency,
+                            "temporal_drift": avg_temporal_drift,
                             "top1": avg_acc,
                             "first_token_acc": avg_first_acc,
                             "first_token_ce": avg_first_ce,
@@ -546,6 +767,7 @@ def main() -> None:
                             f"step={global_step} loss={avg_loss:.5f} teacher_kl={avg_ce:.5f} "
                             f"hard_ce={avg_hard_ce:.5f} prefix_ce={avg_prefix:.5f} "
                             f"prefix_kl={avg_prefix_kl:.5f} consistency={avg_consistency:.5f} "
+                            f"endpoint_ce={avg_endpoint_consistency:.5f} drift={avg_temporal_drift:.5f} "
                             f"top1={avg_acc:.4f} first={avg_first_acc:.4f} "
                             f"greedy_prefix={avg_greedy_prefix_acceptance:.2f} "
                             f"expected_prefix={avg_prefix_expected_acceptance:.2f} "
@@ -559,6 +781,8 @@ def main() -> None:
                         running_prefix_loss = 0.0
                         running_prefix_kl_loss = 0.0
                         running_consistency_loss = 0.0
+                        running_endpoint_consistency = 0.0
+                        running_temporal_drift = 0.0
                         running_acc = 0.0
                         running_first_acc = 0.0
                         running_first_ce = 0.0
@@ -581,6 +805,8 @@ def main() -> None:
                                 kl_reduction=args.kl_reduction,
                                 prefix_weight_decay=args.prefix_weight_decay,
                                 max_batches=args.eval_batches,
+                                flow_objective=args.flow_objective,
+                                time_conditioning_scale=args.flow_time_conditioning_scale,
                             )
                         eval_record.update({"step": global_step, "epoch": epoch, "kind": "eval"})
                         print(

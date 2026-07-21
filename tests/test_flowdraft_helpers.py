@@ -1,6 +1,14 @@
 import torch
 
-from orthrus_training.flowdraft import make_flowdraft_batch, make_flowdraft_inputs_embeds
+from orthrus_training.flowdraft import (
+    add_flow_time_conditioning,
+    flow_map_step_size,
+    make_flowdraft_batch,
+    make_flowdraft_inputs_embeds,
+    sample_cfm_time_pairs,
+    topk_endpoint_embeddings,
+    transport_categorical_state,
+)
 from orthrus_training.losses import (
     prefix_acceptance_metrics,
     prefix_survival_cross_entropy,
@@ -85,3 +93,45 @@ def test_greedy_prefix_acceptance_stops_at_first_error():
     # The two blocks accept 2 and 1 tokens before their first mismatch.
     assert torch.isclose(metrics["greedy_prefix_acceptance"], torch.tensor(1.5))
     assert torch.isclose(metrics["first_token_acc"], torch.tensor(1.0))
+
+
+def test_cfm_time_pairs_have_diagonal_and_ordered_off_diagonal_blocks():
+    torch.manual_seed(7)
+    source, target, diagonal = sample_cfm_time_pairs(
+        batch_size=2,
+        num_blocks=8,
+        diagonal_fraction=0.75,
+        device=torch.device("cpu"),
+    )
+
+    assert diagonal.sum(dim=1).tolist() == [6, 6]
+    assert torch.allclose(source[diagonal], target[diagonal])
+    assert torch.all(target[~diagonal] > source[~diagonal])
+
+
+def test_endpoint_flow_map_reaches_endpoint_at_t_one():
+    source = torch.tensor([[[[0.25, 0.75]]]])
+    endpoint = torch.tensor([[[[0.9, 0.1]]]])
+    transported = transport_categorical_state(source, endpoint, 0.4, 1.0)
+
+    assert torch.allclose(flow_map_step_size(torch.tensor(0.4), torch.tensor(1.0)), torch.tensor(1.0))
+    assert torch.allclose(transported, endpoint)
+
+
+def test_topk_endpoint_embeddings_preserve_simplex_average():
+    logits = torch.tensor([[[0.0, 2.0, 1.0]]])
+    embeddings = torch.tensor([[1.0, 0.0], [0.0, 2.0], [3.0, 3.0]])
+    projected = topk_endpoint_embeddings(logits, embeddings, topk=3)
+    expected = torch.softmax(logits, dim=-1) @ embeddings
+
+    assert torch.allclose(projected, expected, atol=1e-6)
+
+
+def test_flow_time_conditioning_is_explicit_and_shape_stable():
+    inputs = torch.ones((1, 8, 8))
+    source = torch.zeros((1, 2, 1, 1))
+    target = torch.ones((1, 2, 1, 1)) * 0.5
+    conditioned = add_flow_time_conditioning(inputs, source, target, block_size=4, scale=0.1)
+
+    assert conditioned.shape == inputs.shape
+    assert not torch.equal(conditioned, inputs)
