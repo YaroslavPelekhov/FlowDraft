@@ -103,6 +103,7 @@ def parse_args():
         default="eval_greedy_prefix_acceptance",
     )
     parser.add_argument("--save-every", type=int, default=100)
+    parser.add_argument("--save-final", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-trainer-state", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False)
@@ -847,7 +848,7 @@ def main() -> None:
                                         "eval_prefix_expected_acceptance"
                                     ],
                                     "checkpoint_written": True,
-                                    "method": "flowdraft_prefix_cfm",
+                                    "method": metadata["method"],
                                 },
                             )
 
@@ -862,7 +863,7 @@ def main() -> None:
                                 "best_metric": args.best_metric,
                                 "best_metric_value": best_metric_value if best_step is not None else None,
                                 "best_eval_loss": best_eval_loss if best_step is not None else None,
-                                "method": "flowdraft_prefix_cfm",
+                                "method": metadata["method"],
                             },
                         )
                         if args.save_trainer_state:
@@ -878,20 +879,21 @@ def main() -> None:
                 break
 
         progress.close()
-        save_orthrus_checkpoint(model, tokenizer, output_dir / "last", args.upstream_dir)
-        write_json(
-            output_dir / "last_metrics.json",
-            {
-                "last_step": global_step,
-                "best_step": best_step,
-                "best_metric": args.best_metric,
-                "best_metric_value": best_metric_value if best_step is not None else None,
-                "best_eval_loss": best_eval_loss if best_step is not None else None,
-                "method": "flowdraft_prefix_cfm",
-            },
-        )
-        if args.save_trainer_state:
-            save_training_state(output_dir / "last", optimizer, scheduler, global_step, args.epochs)
+        if args.save_final:
+            save_orthrus_checkpoint(model, tokenizer, output_dir / "last", args.upstream_dir)
+            write_json(
+                output_dir / "last_metrics.json",
+                {
+                    "last_step": global_step,
+                    "best_step": best_step,
+                    "best_metric": args.best_metric,
+                    "best_metric_value": best_metric_value if best_step is not None else None,
+                    "best_eval_loss": best_eval_loss if best_step is not None else None,
+                    "method": "flowdraft_categorical_flow_map",
+                },
+            )
+            if args.save_trainer_state:
+                save_training_state(output_dir / "last", optimizer, scheduler, global_step, args.epochs)
     finally:
         metrics_file.close()
 
