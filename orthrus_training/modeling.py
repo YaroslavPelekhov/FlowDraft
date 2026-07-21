@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Iterable
 
 import torch
+from safetensors import safe_open
 from safetensors.torch import load_file
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
@@ -135,6 +136,31 @@ def load_flowdraft_adapter(
         if key in metadata:
             setattr(model.config, key, metadata[key])
     return model, metadata, {"base": load_info, "adapter_missing": missing}
+
+
+def load_trainable_initialization(model: torch.nn.Module, checkpoint_dir: str | Path) -> list[str]:
+    """Load only currently trainable tensors from a full or adapter checkpoint."""
+
+    checkpoint_dir = Path(checkpoint_dir)
+    adapter_path = checkpoint_dir / "adapter_model.safetensors"
+    full_path = checkpoint_dir / "model.safetensors"
+    source_path = adapter_path if adapter_path.exists() else full_path
+    if not source_path.exists():
+        raise FileNotFoundError(f"No adapter_model.safetensors or model.safetensors in {checkpoint_dir}")
+
+    trainable_names = {name for name, parameter in model.named_parameters() if parameter.requires_grad}
+    selected = {}
+    with safe_open(source_path, framework="pt", device="cpu") as handle:
+        available = set(handle.keys())
+        missing = sorted(trainable_names - available)
+        if missing:
+            raise ValueError(f"Initialization checkpoint is missing trainable weights: {missing[:5]}")
+        for name in sorted(trainable_names):
+            selected[name] = handle.get_tensor(name)
+    _, unexpected = model.load_state_dict(selected, strict=False)
+    if unexpected:
+        raise ValueError(f"Unexpected initialization weights: {unexpected}")
+    return sorted(selected)
 
 
 def initialize_diffusion_from_ar(model: torch.nn.Module) -> None:

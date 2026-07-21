@@ -3,6 +3,7 @@ import json
 import torch
 
 from orthrus_training.checkpointing import save_trainable_checkpoint
+from orthrus_training.modeling import load_trainable_initialization
 
 
 class DummyConfig:
@@ -38,3 +39,11 @@ def test_trainable_checkpoint_excludes_frozen_weights(tmp_path):
     assert metadata["base_model"] == "test/base"
     assert metadata["flowdraft_cfm"] is True
     assert metadata["trainable_parameter_names"] == ["adapter.weight"]
+
+    restored = DummyCheckpointModel()
+    with torch.no_grad():
+        restored.adapter.weight.zero_()
+    loaded = load_trainable_initialization(restored, output)
+
+    assert loaded == ["adapter.weight"]
+    assert torch.equal(restored.adapter.weight, model.adapter.weight)

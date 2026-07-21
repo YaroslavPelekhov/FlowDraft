@@ -36,9 +36,9 @@ FlowDraft keeps the same frozen AR backbone, same block size, same verifier, and
 same data. The experimental change is only the drafter:
 
 - Baseline Orthrus: single-step masked diffusion drafter
-- FlowDraft: categorical flow-map endpoint drafter
-- FlowDraft objective: AR-teacher endpoint distillation plus optional flow-map
-  consistency; the paper-comparable first point is `FLOW_STEPS=1`
+- FlowDraft: time-conditioned categorical endpoint flow-map drafter
+- FlowDraft objective: diagonal AR-teacher endpoint distillation plus
+  off-diagonal ECLD; the primary first point is `FLOW_STEPS=1`
 
 ## Official evaluation suite
 
@@ -63,14 +63,15 @@ small generated prompt set for smoke testing training/inference health.
 Every reported accelerated run must pass the lossless gate first:
 
 - Greedy parity: `parity_rate = 1.0`
-- For strict parity checks use `--dtype fp32 --attn-implementation eager`
-- `bf16` / `sdpa` is acceptable only as a fast throughput smoke test
+- Strict parity is required in the same dtype/backend used for the reported
+  throughput. `fp32/eager` is an additional numerical audit, not a substitute
+  for parity in the measured `bf16/sdpa` run.
 
 After parity passes, report:
 
-- Average accepted length
-- Tokens per forward pass (`TPF`)
-- Wall-clock speedup versus sequential AR
+- Cycle-weighted average accepted length
+- Aggregate tokens per forward pass (`total tokens / total forwards`)
+- Aggregate wall-clock throughput speedup versus sequential AR
 - AR tokens/sec and accelerated tokens/sec
 - Task accuracy or pass rate inherited from the base AR run
 

@@ -49,6 +49,7 @@ from orthrus_training.modeling import (
     build_orthrus_from_qwen,
     count_parameters,
     dtype_from_string,
+    load_trainable_initialization,
     load_tokenizer,
 )
 
@@ -62,6 +63,11 @@ def parse_args():
     parser.add_argument("--eval-manifest", default=None)
     parser.add_argument("--allow-eval-overlap", action="store_true")
     parser.add_argument("--output-dir", default="/dev/shm/flowdraft_runs/flowdraft_quick2h")
+    parser.add_argument(
+        "--init-checkpoint",
+        default=None,
+        help="Optional full or trainable checkpoint used to initialize the diffusion projections.",
+    )
     parser.add_argument("--block-size", type=int, default=32)
     parser.add_argument("--mask-token-id", type=int, default=151669)
     parser.add_argument("--num-anchor-blocks", type=int, default=32)
@@ -546,6 +552,13 @@ def main() -> None:
         dtype=dtype,
         attn_implementation=args.attn_implementation,
     )
+    initialized_names = []
+    if args.init_checkpoint:
+        initialized_names = load_trainable_initialization(model, args.init_checkpoint)
+        print(
+            f"initialized trainable projections from {args.init_checkpoint} "
+            f"tensors={len(initialized_names)}"
+        )
     model.to(device=device, dtype=dtype)
     model.train()
     model.config.use_cache = True
@@ -585,6 +598,7 @@ def main() -> None:
         ),
         "simplex_projection": f"renormalized_topk_{args.endpoint_topk}",
         "temporal_derivative": "forward_finite_difference" if args.flow_objective == "ecld" else None,
+        "initialized_trainable_tensors": len(initialized_names),
         "total_params": total_params,
         "trainable_params": trainable_params,
         "trainable_ratio": trainable_ratio,

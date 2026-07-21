@@ -22,7 +22,7 @@ training:
   frozen_backbone: true
   objective:
     orthrus: forward_kl_from_frozen_ar_teacher
-    flowdraft: endpoint_teacher_distillation_plus_optional_flow_consistency
+    flowdraft: diagonal_teacher_distillation_plus_off_diagonal_ecld
   scheduler: cosine
   warmup_ratio: 0.05
   gradient_clip_norm: 1.0
@@ -44,9 +44,9 @@ lossless_gate:
 
 metrics:
   primary:
-    - avg_accepted_length
-    - tokens_per_forward_pass
-    - wall_clock_speedup_vs_ar
+    - cycle_weighted_accepted_length
+    - aggregate_tokens_per_forward_pass
+    - aggregate_wall_clock_speedup_vs_ar
     - parity_rate
   secondary:
     - ar_tokens_per_second
