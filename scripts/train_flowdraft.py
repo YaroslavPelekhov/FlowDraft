@@ -2,10 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import os
+import platform
+import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
@@ -484,6 +489,70 @@ def write_json(path: Path, payload: dict) -> None:
         f.write("\n")
 
 
+def sha256_file(path: str | Path) -> str | None:
+    candidate = Path(path)
+    if not candidate.is_file():
+        return None
+    digest = hashlib.sha256()
+    with candidate.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def git_metadata(repo_root: Path) -> dict:
+    def git_value(*args: str) -> str | None:
+        try:
+            return subprocess.check_output(
+                ["git", *args], cwd=repo_root, text=True, stderr=subprocess.DEVNULL
+            ).strip()
+        except (OSError, subprocess.CalledProcessError):
+            return None
+
+    return {
+        "commit": git_value("rev-parse", "HEAD"),
+        "branch": git_value("branch", "--show-current"),
+        "status": git_value("status", "--short"),
+    }
+
+
+def write_run_manifest(
+    output_dir: Path,
+    args,
+    config_path: str | None,
+    config_values: dict,
+    repo_root: Path,
+) -> None:
+    manifest = {
+        "status": "running",
+        "started_at_utc": datetime.now(timezone.utc).isoformat(),
+        "command": [sys.executable, *sys.argv],
+        "cwd": str(Path.cwd()),
+        "platform": platform.platform(),
+        "python": sys.version,
+        "torch": torch.__version__,
+        "cuda_runtime": torch.version.cuda,
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        "git": git_metadata(repo_root),
+        "config_file": {
+            "path": str(Path(config_path).resolve()) if config_path else None,
+            "sha256": sha256_file(config_path) if config_path else None,
+            "resolved": config_values,
+        },
+        "train_manifest": {
+            "path": str(Path(args.train_manifest).resolve()),
+            "sha256": sha256_file(args.train_manifest),
+        },
+        "eval_manifest": {
+            "path": str(Path(args.eval_manifest).resolve()) if args.eval_manifest else None,
+            "sha256": sha256_file(args.eval_manifest) if args.eval_manifest else None,
+        },
+        "args": vars(args),
+    }
+    write_json(output_dir / "run_manifest.json", manifest)
+
+
 def save_model_checkpoint(model, tokenizer, output_dir: Path, args) -> None:
     if args.checkpoint_format == "trainable":
         save_trainable_checkpoint(model, output_dir, args.base_model)
@@ -493,7 +562,8 @@ def save_model_checkpoint(model, tokenizer, output_dir: Path, args) -> None:
 
 def main() -> None:
     parsed_args, cli_keys = parse_args()
-    args = merge_config(parsed_args, load_config_file(parsed_args.config), cli_keys)
+    config_values = load_config_file(parsed_args.config)
+    args = merge_config(parsed_args, config_values, cli_keys)
     set_seed(args.seed)
 
     if args.flow_objective == "ecld" and args.consistency_weight > 0:
@@ -516,6 +586,13 @@ def main() -> None:
     dtype = dtype_from_string(args.dtype)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    write_run_manifest(
+        output_dir,
+        args,
+        args.config,
+        config_values,
+        Path(__file__).resolve().parents[1],
+    )
 
     tokenizer = load_tokenizer(args.base_model)
     dataset = PackedTokenDataset(args.train_manifest)
@@ -933,6 +1010,16 @@ def main() -> None:
             )
             if args.save_trainer_state:
                 save_training_state(output_dir / "last", optimizer, scheduler, global_step, args.epochs)
+        manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
+        manifest.update(
+            {
+                "status": "completed",
+                "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "global_step": global_step,
+                "best_step": best_step,
+            }
+        )
+        write_json(output_dir / "run_manifest.json", manifest)
     finally:
         metrics_file.close()
 

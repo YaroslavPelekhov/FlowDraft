@@ -25,7 +25,7 @@ def parse_args():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--prompts-jsonl", default=None)
     parser.add_argument("--max-new-tokens", type=int, default=128)
-    parser.add_argument("--attn-implementation", default="sdpa")
+    parser.add_argument("--attn-implementation", default="eager")
     return parser.parse_args()
 
 

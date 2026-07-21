@@ -72,7 +72,10 @@ def parse_args():
     parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--flow-steps", type=int, default=1)
     parser.add_argument("--warmup-prompts", type=int, default=1)
-    parser.add_argument("--attn-implementation", default="sdpa")
+    # Exact parity is sensitive to block-vs-token numerical differences in
+    # fused SDPA kernels. Use eager attention unless throughput is requested
+    # explicitly with --attn-implementation sdpa.
+    parser.add_argument("--attn-implementation", default="eager")
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("--benchmark-task", choices=sorted(PAPER_GREEDY_TARGETS), default=None)
     parser.add_argument("--paper-speedup-target", type=float, default=None)
@@ -427,6 +430,9 @@ def main() -> None:
 
     summary = {
         "num_prompts": len(rows),
+        "command": [sys.executable, *sys.argv],
+        "cwd": str(Path.cwd()),
+        "checkpoint": str(Path(args.checkpoint).resolve()),
         "benchmark_task": benchmark_task,
         "flow_steps": args.flow_steps,
         "dtype": args.dtype,

@@ -59,6 +59,8 @@ CONSISTENCY_WEIGHT="${CONSISTENCY_WEIGHT:-0.1}"
 CONSISTENCY_START_STEP="${CONSISTENCY_START_STEP:-200}"
 REBUILD_DATA="${REBUILD_DATA:-0}"
 CLEAN_OUTPUT="${CLEAN_OUTPUT:-0}"
+HF_REPO_ID="${HF_REPO_ID:-}"
+HF_RUN_PATH="${HF_RUN_PATH:-}"
 BENCH_PARITY_ARGS=()
 if [ "$BENCH_REQUIRE_PARITY" = "1" ]; then
   BENCH_PARITY_ARGS+=(--require-parity)
@@ -83,8 +85,18 @@ if free_gb < 12:
 PY
 
 if [ "$CLEAN_OUTPUT" = "1" ]; then
-  log "Removing previous output at ${OUT_DIR}"
-  rm -rf "$OUT_DIR"
+  if [ -d "$OUT_DIR" ]; then
+    ARCHIVE_ROOT="${ARCHIVE_ROOT:-${OUT_DIR}_archive}"
+    mkdir -p "$ARCHIVE_ROOT"
+    ARCHIVE_DIR="$ARCHIVE_ROOT/$(basename "$OUT_DIR")_$(date -u +%Y%m%dT%H%M%SZ)"
+    log "Archiving previous output at ${ARCHIVE_DIR}"
+    mv "$OUT_DIR" "$ARCHIVE_DIR"
+  fi
+  mkdir -p "$OUT_DIR"
+fi
+
+if [ ! -f "$OUT_DIR/run.log" ]; then
+  exec > >(tee -a "$OUT_DIR/run.log") 2>&1
 fi
 
 if [ "$REBUILD_DATA" = "1" ] || [ ! -f "$DATA_DIR/manifest.json" ]; then
@@ -186,5 +198,14 @@ for steps in $FLOW_STEPS; do
       "${BENCH_PARITY_ARGS[@]}"
   fi
 done
+
+if [ -n "$HF_REPO_ID" ]; then
+  log "Uploading best/last checkpoints to Hugging Face repo ${HF_REPO_ID}"
+  HF_UPLOAD_ARGS=(--run-dir "$OUT_DIR" --repo-id "$HF_REPO_ID")
+  if [ -n "$HF_RUN_PATH" ]; then
+    HF_UPLOAD_ARGS+=(--run-path "$HF_RUN_PATH")
+  fi
+  "$PYTHON_BIN" scripts/upload_checkpoints_hf.py "${HF_UPLOAD_ARGS[@]}"
+fi
 
 log "FlowDraft quick compare complete: ${OUT_DIR}"

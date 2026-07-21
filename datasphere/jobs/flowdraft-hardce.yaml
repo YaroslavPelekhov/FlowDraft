@@ -13,6 +13,8 @@ env:
     - HARD_CE_WEIGHT: "0.5"
     - CONSISTENCY_WEIGHT: "0.0"
     - KEEP_CHECKPOINTS: "0"
+    - HF_REPO_ID
+    - HF_RUN_PATH: ""
   python:
     type: manual
     version: "3.10"

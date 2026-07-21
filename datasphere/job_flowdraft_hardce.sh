@@ -51,6 +51,8 @@ PREFIX_WEIGHT_DECAY="${PREFIX_WEIGHT_DECAY:-0.9}"
 CONSISTENCY_WEIGHT="${CONSISTENCY_WEIGHT:-0.0}"
 CONSISTENCY_START_STEP="${CONSISTENCY_START_STEP:-10000}"
 KEEP_CHECKPOINTS="${KEEP_CHECKPOINTS:-0}"
+HF_REPO_ID="${HF_REPO_ID:-}"
+HF_RUN_PATH="${HF_RUN_PATH:-}"
 
 log "Python: $("$PYTHON_BIN" --version 2>&1)"
 log "Preparing result directory: ${RESULTS_DIR}"
@@ -91,6 +93,8 @@ FLOW_STEPS="$FLOW_STEPS" \
 BENCH_DTYPE="$BENCH_DTYPE" \
 BENCH_ATTN_IMPLEMENTATION="$BENCH_ATTN_IMPLEMENTATION" \
 BENCH_REQUIRE_PARITY="$BENCH_REQUIRE_PARITY" \
+HF_REPO_ID="$HF_REPO_ID" \
+HF_RUN_PATH="$HF_RUN_PATH" \
 FLOW_STATE_MIN=0.0 \
 FLOW_STATE_MAX=0.0 \
 KL_REDUCTION="$KL_REDUCTION" \
@@ -107,7 +111,11 @@ log "Collecting metrics"
 find "$OUT_DIR" -maxdepth 1 -type f \( -name '*.json' -o -name '*.jsonl' -o -name '*.txt' \) -print0 |
   while IFS= read -r -d '' file; do
     cp "$file" "$RESULTS_DIR/"
-  done
+done
+
+if [ -f "$OUT_DIR/run.log" ]; then
+  cp "$OUT_DIR/run.log" "$RESULTS_DIR/"
+fi
 
 if [ -d "$OUT_DIR/best" ]; then
   find "$OUT_DIR/best" -maxdepth 1 -type f \( -name 'config.json' -o -name 'generation_config.json' \) -print0 |

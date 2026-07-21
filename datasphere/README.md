@@ -85,6 +85,18 @@ scripts/remote-run.sh
 
 The default job config is `datasphere/jobs/flowdraft-hardce.yaml`. It requests `g1.1`, uses a 100GB working storage, keeps large checkpoints in `/dev/shm`, and returns metrics under `outputs/flowdraft_hardce_quick2h`. If your project uses a different A100 configuration name, edit `cloud-instance-types` in the YAML before launch.
 
+Experiment preservation is split deliberately: Git stores compact protocols and metrics, while a private Hugging Face model repository stores the `best/` and `last/` weights. Set `HF_REPO_ID` in the DataSphere job environment to upload both checkpoints automatically. They are stored under `runs/<output-directory-name>/best` and `runs/<output-directory-name>/last`; set `HF_RUN_PATH` to choose another immutable run path. After downloading job outputs locally, record them in Git with:
+
+```bash
+python3 scripts/record_experiment.py \
+  --source-dir outputs/downloaded-jobs/<JOB_ID>/outputs/flowdraft_hardce_quick2h \
+  --record-id 20260721_flowdraft_stage1_masked_r2
+git add experiments/20260721_flowdraft_stage1_masked_r2
+git commit -m "Record FlowDraft stage1 masked benchmark"
+```
+
+The run directory also keeps `run.log`, raw benchmark JSONL, summaries, training metrics, and preflight files. Setting `CLEAN_OUTPUT=1` archives an existing output directory next to it instead of deleting it.
+
 Useful commands:
 
 ```bash
