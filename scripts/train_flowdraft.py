@@ -32,7 +32,8 @@ from orthrus_training.data import (
     sample_anchor_positions,
 )
 from orthrus_training.flowdraft import (
-    add_flow_time_conditioning,
+    condition_flowdraft_state,
+    exact_endpoint_embeddings,
     flow_map_step_size,
     make_flowdraft_batch,
     make_flowdraft_inputs_embeds,
@@ -56,6 +57,7 @@ from orthrus_training.modeling import (
     dtype_from_string,
     load_trainable_initialization,
     load_tokenizer,
+    set_flowdraft_state_adapter_trainable,
 )
 
 
@@ -97,6 +99,12 @@ def parse_args():
     parser.add_argument("--flow-time-max", type=float, default=0.95)
     parser.add_argument("--flow-time-conditioning-scale", type=float, default=0.1)
     parser.add_argument("--endpoint-topk", type=int, default=32)
+    parser.add_argument("--endpoint-transport", choices=["topk", "dense"], default="topk")
+    parser.add_argument("--endpoint-vocab-chunk-size", type=int, default=8192)
+    parser.add_argument("--flow-state-adapter", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--flow-adapter-bottleneck", type=int, default=256)
+    parser.add_argument("--one-jump-fraction", type=float, default=0.0)
+    parser.add_argument("--ecld-time-weight", choices=["uniform", "paper_clamped"], default="uniform")
     parser.add_argument("--temporal-difference-epsilon", type=float, default=0.02)
     parser.add_argument("--temporal-drift-weight", type=float, default=1.0)
     parser.add_argument("--hard-ce-weight", type=float, default=0.5)
@@ -123,6 +131,7 @@ def parse_args():
     parser.add_argument("--save-trainer-state", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--allow-missing-init-trainables", action=argparse.BooleanOptionalAction, default=False)
     args = parser.parse_args()
     cli_keys = {
         action.dest
@@ -165,6 +174,7 @@ def flowdraft_forward(
     time_logit_std: float = 1.0,
     time_max: float = 0.95,
     time_conditioning_scale: float = 0.1,
+    one_jump_fraction: float = 0.0,
     source_time: torch.Tensor | None = None,
     target_time: torch.Tensor | None = None,
     force_one_jump: bool = False,
@@ -201,6 +211,7 @@ def flowdraft_forward(
                 logit_mean=time_logit_mean,
                 logit_std=time_logit_std,
                 max_time=time_max,
+                one_jump_fraction=one_jump_fraction,
             )
         else:
             diagonal_mask = torch.isclose(source_time, target_time).reshape(
@@ -222,7 +233,8 @@ def flowdraft_forward(
         state_mix=state_mix,
     )
     if flow_objective == "ecld":
-        flow_inputs = add_flow_time_conditioning(
+        flow_inputs = condition_flowdraft_state(
+            model,
             flow_inputs,
             source_time,
             target_time,
@@ -281,14 +293,17 @@ def ecld_consistency_loss(
     target_time: torch.Tensor,
     diagonal_mask: torch.Tensor,
     endpoint_topk: int,
+    endpoint_transport: str,
+    endpoint_vocab_chunk_size: int,
+    ecld_time_weight: str,
     time_conditioning_scale: float,
     temporal_difference_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Finite-difference ECLD on off-diagonal CFM blocks.
 
-    The endpoint-consistency term is exact for the retained top-k simplex.
-    The temporal derivative is a centered-by-domain forward difference, which
-    avoids unsupported full-model JVPs in FlexAttention on a single A100.
+    Dense transport uses the complete vocabulary simplex. The temporal
+    derivative is finite-difference because the upstream attention stack does
+    not support a full-model JVP on the target hardware.
     """
 
     off_diagonal = ~diagonal_mask
@@ -315,12 +330,20 @@ def ecld_consistency_loss(
         mask_token_id=mask_token_id,
         state_mix=selected_source,
     ).reshape(batch_size, off_blocks, block_size, -1)
-    endpoint_embeds = topk_endpoint_embeddings(
-        selected_logits,
-        model.model.embed_tokens.weight,
-        topk=endpoint_topk,
-        temperature=temperature,
-    )
+    if endpoint_transport == "dense":
+        endpoint_embeds = exact_endpoint_embeddings(
+            selected_logits,
+            model.model.embed_tokens.weight,
+            temperature=temperature,
+            vocab_chunk_size=endpoint_vocab_chunk_size,
+        )
+    else:
+        endpoint_embeds = topk_endpoint_embeddings(
+            selected_logits,
+            model.model.embed_tokens.weight,
+            topk=endpoint_topk,
+            temperature=temperature,
+        )
     transported_draft = transport_categorical_state(
         source_inputs[:, :, 1:, :],
         endpoint_embeds,
@@ -329,7 +352,8 @@ def ecld_consistency_loss(
     )
     transported_inputs = torch.cat([source_inputs[:, :, :1, :], transported_draft], dim=2)
     transported_inputs = transported_inputs.reshape(batch_size, off_blocks * block_size, -1).detach()
-    transported_inputs = add_flow_time_conditioning(
+    transported_inputs = condition_flowdraft_state(
+        model,
         transported_inputs,
         selected_target,
         selected_target,
@@ -351,12 +375,26 @@ def ecld_consistency_loss(
         endpoint_targets = F.softmax(target_logits.float() / temperature, dim=-1)
 
     endpoint_log_probs = F.log_softmax(selected_logits.float() / temperature, dim=-1)
-    endpoint_consistency = -(endpoint_targets * endpoint_log_probs).sum(dim=-1).mean() * (temperature**2)
+    endpoint_ce = -(endpoint_targets * endpoint_log_probs).sum(dim=-1)
+    if ecld_time_weight == "paper_clamped":
+        block_weights = (1.0 - selected_target.squeeze(-1).squeeze(-1)).clamp_min(0.05).pow(-2)
+        token_weights = block_weights.unsqueeze(-1).expand(-1, -1, block_size - 1).reshape_as(endpoint_ce)
+        endpoint_consistency = (token_weights * endpoint_ce).mean() * (temperature**2)
+    elif ecld_time_weight == "uniform":
+        endpoint_consistency = endpoint_ce.mean() * (temperature**2)
+    else:
+        raise ValueError(f"Unsupported ECLD time weight: {ecld_time_weight}")
 
-    next_target = (selected_target + temporal_difference_epsilon).clamp_max(0.999)
-    delta = (next_target - selected_target).clamp_min(1e-3)
+    # Use a backward difference at t=1.  The one-jump boundary pairs include
+    # exactly t=1, where a forward finite difference would reverse direction.
+    backward_difference = selected_target >= 0.999
+    forward_target = (selected_target + temporal_difference_epsilon).clamp_max(0.999)
+    backward_target = (selected_target - temporal_difference_epsilon).clamp_min(selected_source)
+    next_target = torch.where(backward_difference, backward_target, forward_target)
+    delta = (next_target - selected_target).abs().clamp_min(1e-3)
     next_inputs = source_inputs.reshape(batch_size, off_blocks * block_size, -1)
-    next_inputs = add_flow_time_conditioning(
+    next_inputs = condition_flowdraft_state(
+        model,
         next_inputs,
         selected_source,
         next_target,
@@ -375,7 +413,11 @@ def ecld_consistency_loss(
     next_logits = select_endpoint_logits(next_outputs.logits, block_size).reshape_as(selected_logits)
     current_probs = F.softmax(selected_logits.float() / temperature, dim=-1)
     next_probs = F.softmax(next_logits.float() / temperature, dim=-1)
-    derivative = (next_probs - current_probs) / delta
+    derivative = torch.where(
+        backward_difference,
+        (current_probs - next_probs) / delta,
+        (next_probs - current_probs) / delta,
+    )
     drift_per_token = derivative.square().sum(dim=-1)
     gamma = flow_map_step_size(selected_source, selected_target).reshape(batch_size, off_blocks, 1)
     temporal_drift = (gamma.square() * drift_per_token).mean()
@@ -628,10 +670,15 @@ def main() -> None:
         mask_token_id=args.mask_token_id,
         dtype=dtype,
         attn_implementation=args.attn_implementation,
+        flowdraft_adapter_bottleneck=args.flow_adapter_bottleneck,
     )
     initialized_names = []
     if args.init_checkpoint:
-        initialized_names = load_trainable_initialization(model, args.init_checkpoint)
+        initialized_names = load_trainable_initialization(
+            model,
+            args.init_checkpoint,
+            allow_missing_trainables=args.allow_missing_init_trainables,
+        )
         print(
             f"initialized trainable projections from {args.init_checkpoint} "
             f"tensors={len(initialized_names)}"
@@ -643,7 +690,12 @@ def main() -> None:
     model.config.flowdraft_cfm = args.flow_objective == "ecld"
     model.config.flowdraft_time_conditioning_scale = args.flow_time_conditioning_scale
     model.config.flowdraft_endpoint_topk = args.endpoint_topk
+    model.config.flowdraft_endpoint_transport = args.endpoint_transport
+    model.config.flowdraft_state_adapter = args.flow_state_adapter
+    model.config.flowdraft_adapter_bottleneck = args.flow_adapter_bottleneck
+    model.config.flowdraft_one_jump_fraction = args.one_jump_fraction
     model.config.flowdraft_objective = args.flow_objective
+    set_flowdraft_state_adapter_trainable(model, args.flow_state_adapter)
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
     if args.compile:
@@ -667,14 +719,18 @@ def main() -> None:
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
 
     metadata = vars(args) | {
-        "method": "flowdraft_categorical_flow_map" if args.flow_objective == "ecld" else "flowdraft_legacy",
+        "method": "flowdraft_categorical_flow_map_v2" if args.flow_state_adapter else (
+            "flowdraft_categorical_flow_map" if args.flow_objective == "ecld" else "flowdraft_legacy"
+        ),
         "objective": (
             "diagonal_vfm_teacher_distillation_plus_off_diagonal_finite_difference_ecld"
             if args.flow_objective == "ecld"
             else "endpoint_teacher_distillation_plus_prefix_survival"
         ),
-        "simplex_projection": f"renormalized_topk_{args.endpoint_topk}",
-        "temporal_derivative": "forward_finite_difference" if args.flow_objective == "ecld" else None,
+        "simplex_projection": "complete_vocabulary_expectation"
+        if args.endpoint_transport == "dense"
+        else f"renormalized_topk_{args.endpoint_topk}",
+        "temporal_derivative": "finite_difference_boundary_safe" if args.flow_objective == "ecld" else None,
         "initialized_trainable_tensors": len(initialized_names),
         "total_params": total_params,
         "trainable_params": trainable_params,
@@ -728,6 +784,7 @@ def main() -> None:
                     time_logit_std=args.flow_time_logit_std,
                     time_max=args.flow_time_max,
                     time_conditioning_scale=args.flow_time_conditioning_scale,
+                    one_jump_fraction=args.one_jump_fraction,
                 )
 
                 supervised_mask = out["diagonal_mask"] if args.flow_objective == "ecld" else torch.ones_like(
@@ -796,6 +853,9 @@ def main() -> None:
                         target_time=out["target_time"],
                         diagonal_mask=out["diagonal_mask"],
                         endpoint_topk=args.endpoint_topk,
+                        endpoint_transport=args.endpoint_transport,
+                        endpoint_vocab_chunk_size=args.endpoint_vocab_chunk_size,
+                        ecld_time_weight=args.ecld_time_weight,
                         time_conditioning_scale=args.flow_time_conditioning_scale,
                         temporal_difference_epsilon=args.temporal_difference_epsilon,
                     )

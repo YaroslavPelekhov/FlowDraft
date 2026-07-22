@@ -70,6 +70,7 @@ def sample_cfm_time_pairs(
     logit_std: float = 1.0,
     min_time: float = 0.0,
     max_time: float = 0.95,
+    one_jump_fraction: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Sample diagonal VFM and off-diagonal CFM time pairs per block.
 
@@ -81,12 +82,17 @@ def sample_cfm_time_pairs(
         raise ValueError("diagonal_fraction must be in (0, 1]")
     if min_time < 0.0 or max_time >= 1.0 or min_time > max_time:
         raise ValueError(f"Invalid time interval [{min_time}, {max_time}]")
+    if not 0.0 <= one_jump_fraction <= 1.0:
+        raise ValueError("one_jump_fraction must be in [0, 1]")
 
     shape = (batch_size, num_blocks, 1, 1)
     raw_s = torch.randn(shape, device=device) * logit_std + logit_mean
     raw_t = torch.randn(shape, device=device) * logit_std + logit_mean
     source_time = torch.sigmoid(raw_s).clamp(min_time, max_time)
     target_time = torch.sigmoid(raw_t).clamp(min_time, max_time)
+    diagonal_time = torch.sigmoid(
+        torch.randn(shape, device=device) * logit_std + logit_mean
+    ).clamp(min_time, max_time)
 
     diagonal_count = max(1, round(num_blocks * diagonal_fraction))
     diagonal_count = min(num_blocks, diagonal_count)
@@ -98,8 +104,10 @@ def sample_cfm_time_pairs(
     diagonal_mask = torch.gather(diagonal_mask, 1, order)
     lo = torch.minimum(source_time, target_time)
     hi = torch.maximum(source_time, target_time)
-    source_time = torch.where(diagonal_mask[..., None, None], lo, lo)
-    target_time = torch.where(diagonal_mask[..., None, None], lo, hi)
+    # The VFM term is evaluated at x_t.  Sampling a separate diagonal t is
+    # essential: using min(s, t) would bias the diagonal loss toward noise.
+    source_time = torch.where(diagonal_mask[..., None, None], diagonal_time, lo)
+    target_time = torch.where(diagonal_mask[..., None, None], diagonal_time, hi)
 
     # Avoid a zero-width off-diagonal interval after finite-precision clamping.
     source_time = torch.where(
@@ -110,6 +118,18 @@ def sample_cfm_time_pairs(
         source_time,
         torch.maximum(target_time, source_time + 1e-3).clamp_max(max_time),
     )
+
+    if one_jump_fraction > 0.0 and diagonal_count < num_blocks:
+        off_count = num_blocks - diagonal_count
+        one_jump_count = min(off_count, round(off_count * one_jump_fraction))
+        if one_jump_count:
+            scores = torch.rand((batch_size, num_blocks), device=device)
+            scores = scores.masked_fill(diagonal_mask, -1.0)
+            selected = scores.topk(one_jump_count, dim=1).indices
+            one_jump_mask = torch.zeros_like(diagonal_mask)
+            one_jump_mask.scatter_(1, selected, True)
+            source_time = torch.where(one_jump_mask[..., None, None], torch.zeros_like(source_time), source_time)
+            target_time = torch.where(one_jump_mask[..., None, None], torch.ones_like(target_time), target_time)
     return source_time, target_time, diagonal_mask
 
 
@@ -164,6 +184,47 @@ def topk_endpoint_embeddings(
     probabilities = F.softmax(values, dim=-1).to(dtype=embedding_weight.dtype)
     embeddings = F.embedding(indices, embedding_weight)
     return (probabilities.unsqueeze(-1) * embeddings).sum(dim=-2)
+
+
+@torch.no_grad()
+def exact_endpoint_embeddings(
+    logits: torch.Tensor,
+    embedding_weight: torch.Tensor,
+    temperature: float = 1.0,
+    vocab_chunk_size: int = 8192,
+) -> torch.Tensor:
+    """Compute E_{v~softmax(logits)}[embedding(v)] without top-k truncation.
+
+    CFM transports a simplex-valued endpoint.  Renormalizing the top-k logits
+    changes that endpoint and invalidates the ECLD target.  This chunked
+    computation keeps the complete vocabulary while avoiding a second dense
+    probability tensor the size of the logits.
+    """
+
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
+    if vocab_chunk_size <= 0:
+        raise ValueError("vocab_chunk_size must be positive")
+    if logits.shape[-1] != embedding_weight.shape[0]:
+        raise ValueError("logits vocabulary and embedding vocabulary must match")
+
+    original_shape = logits.shape[:-1]
+    vocab_size = logits.shape[-1]
+    flat_logits = logits.detach().float().reshape(-1, vocab_size) / temperature
+    row_max = flat_logits.max(dim=-1, keepdim=True).values
+    numerator = torch.zeros(
+        (flat_logits.shape[0], embedding_weight.shape[1]),
+        device=logits.device,
+        dtype=torch.float32,
+    )
+    denominator = torch.zeros((flat_logits.shape[0], 1), device=logits.device, dtype=torch.float32)
+    for start in range(0, vocab_size, vocab_chunk_size):
+        end = min(start + vocab_chunk_size, vocab_size)
+        weights = torch.exp(flat_logits[:, start:end] - row_max)
+        denominator += weights.sum(dim=-1, keepdim=True)
+        numerator += weights @ embedding_weight[start:end].float()
+    result = numerator / denominator.clamp_min(torch.finfo(numerator.dtype).tiny)
+    return result.reshape(*original_shape, embedding_weight.shape[1]).to(dtype=embedding_weight.dtype)
 
 
 def sinusoidal_flow_time_embedding(
@@ -227,6 +288,32 @@ def add_flow_time_conditioning(
     rms = blocks.float().square().mean(dim=-1, keepdim=True).sqrt().mean(dim=(1, 2), keepdim=True)
     conditioned = blocks + scale * rms.to(blocks.dtype) * time_embed
     return conditioned.reshape_as(inputs_embeds)
+
+
+def condition_flowdraft_state(
+    model,
+    inputs_embeds: torch.Tensor,
+    source_time: torch.Tensor,
+    target_time: torch.Tensor,
+    block_size: int,
+    scale: float,
+) -> torch.Tensor:
+    """Use the CFM adapter when enabled, otherwise preserve legacy checkpoints."""
+
+    if not bool(getattr(model.config, "flowdraft_state_adapter", False)):
+        return add_flow_time_conditioning(
+            inputs_embeds, source_time, target_time, block_size=block_size, scale=scale
+        )
+    hidden_size = inputs_embeds.shape[-1]
+    batch_size = inputs_embeds.shape[0]
+    num_blocks = inputs_embeds.shape[1] // block_size
+    time_embed = sinusoidal_flow_time_embedding(
+        source_time.reshape(batch_size, num_blocks, 1),
+        target_time.reshape(batch_size, num_blocks, 1),
+        hidden_size,
+        inputs_embeds.dtype,
+    )
+    return model.flowdraft_state_adapter(inputs_embeds, time_embed, block_size)
 
 
 def make_flowdraft_inputs_embeds(

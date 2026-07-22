@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Iterable
 
 import torch
+import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import load_file
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
@@ -17,6 +18,69 @@ DIFFUSION_TRAINABLE_MARKERS = (
     "k_proj_diff",
     "v_proj_diff",
 )
+
+
+class FlowDraftStateAdapter(nn.Module):
+    """Map continuous categorical states into Qwen's embedding space.
+
+    The frozen backbone was pretrained on discrete token embeddings.  CFM states
+    are convex combinations of categorical vertices, so they need a small,
+    trainable and time-conditioned adapter before entering the diffusion path.
+    The residual branch starts at zero, preserving the original Orthrus
+    initialization while allowing the adapter to learn the continuous geometry.
+    """
+
+    def __init__(self, hidden_size: int, bottleneck_size: int = 256, eps: float = 1e-6):
+        super().__init__()
+        if hidden_size <= 0 or bottleneck_size <= 0:
+            raise ValueError("hidden_size and bottleneck_size must be positive")
+        self.hidden_size = hidden_size
+        self.eps = eps
+        self.down = nn.Linear(hidden_size, bottleneck_size)
+        self.film = nn.Linear(hidden_size, bottleneck_size * 2)
+        self.up = nn.Linear(bottleneck_size, hidden_size)
+        nn.init.zeros_(self.up.weight)
+        nn.init.zeros_(self.up.bias)
+
+    def forward(self, inputs_embeds: torch.Tensor, time_embed: torch.Tensor, block_size: int) -> torch.Tensor:
+        batch_size, flat_length, hidden_size = inputs_embeds.shape
+        if hidden_size != self.hidden_size:
+            raise ValueError(f"Expected hidden size {self.hidden_size}, got {hidden_size}")
+        if flat_length % block_size:
+            raise ValueError("FlowDraft state length must be divisible by block_size")
+
+        num_blocks = flat_length // block_size
+        if time_embed.shape != (batch_size, num_blocks, hidden_size):
+            raise ValueError(
+                f"Expected time embedding {(batch_size, num_blocks, hidden_size)}, got {tuple(time_embed.shape)}"
+            )
+
+        blocks = inputs_embeds.reshape(batch_size, num_blocks, block_size, hidden_size)
+        rms = blocks.float().square().mean(dim=-1, keepdim=True).add(self.eps).sqrt()
+        normalized = blocks / rms.to(blocks.dtype)
+        hidden = self.down(normalized)
+        film = self.film(time_embed).unsqueeze(2)
+        scale, shift = film.chunk(2, dim=-1)
+        hidden = torch.nn.functional.silu(hidden * (1.0 + scale) + shift)
+        return (blocks + self.up(hidden)).reshape_as(inputs_embeds)
+
+
+def attach_flowdraft_state_adapter(model: torch.nn.Module, bottleneck_size: int = 256) -> None:
+    """Attach the adapter once so it participates in adapter checkpoints."""
+
+    if hasattr(model, "flowdraft_state_adapter"):
+        return
+    hidden_size = int(model.config.hidden_size)
+    model.flowdraft_state_adapter = FlowDraftStateAdapter(hidden_size, bottleneck_size)
+
+
+def set_flowdraft_state_adapter_trainable(model: torch.nn.Module, enabled: bool) -> None:
+    """Keep legacy Orthrus adapters binary-compatible with their old checkpoints."""
+
+    if not hasattr(model, "flowdraft_state_adapter"):
+        raise ValueError("Model has no FlowDraft state adapter")
+    for parameter in model.flowdraft_state_adapter.parameters():
+        parameter.requires_grad = enabled
 
 
 def import_upstream_orthrus(upstream_dir: str | Path):
@@ -68,6 +132,7 @@ def build_orthrus_from_qwen(
     dtype: torch.dtype = torch.bfloat16,
     attn_implementation: str = "sdpa",
     device_map: str | dict | None = None,
+    flowdraft_adapter_bottleneck: int = 256,
 ):
     """Create an OrthrusLM initialized from a Qwen3 CausalLM checkpoint."""
 
@@ -90,6 +155,7 @@ def build_orthrus_from_qwen(
 
     missing, unexpected = orthrus.load_state_dict(base.state_dict(), strict=False)
     initialize_diffusion_from_ar(orthrus)
+    attach_flowdraft_state_adapter(orthrus, flowdraft_adapter_bottleneck)
     freeze_non_diffusion_parameters(orthrus)
 
     del base
@@ -117,6 +183,7 @@ def load_flowdraft_adapter(
         mask_token_id=int(metadata["mask_token_id"]),
         dtype=dtype,
         attn_implementation=attn_implementation,
+        flowdraft_adapter_bottleneck=int(metadata.get("flowdraft_adapter_bottleneck", 256)),
     )
     adapter_state = load_file(checkpoint_dir / "adapter_model.safetensors")
     missing, unexpected = model.load_state_dict(adapter_state, strict=False)
@@ -132,13 +199,21 @@ def load_flowdraft_adapter(
         "flowdraft_objective",
         "flowdraft_time_conditioning_scale",
         "flowdraft_endpoint_topk",
+        "flowdraft_endpoint_transport",
+        "flowdraft_state_adapter",
+        "flowdraft_adapter_bottleneck",
+        "flowdraft_one_jump_fraction",
     ):
         if key in metadata:
             setattr(model.config, key, metadata[key])
     return model, metadata, {"base": load_info, "adapter_missing": missing}
 
 
-def load_trainable_initialization(model: torch.nn.Module, checkpoint_dir: str | Path) -> list[str]:
+def load_trainable_initialization(
+    model: torch.nn.Module,
+    checkpoint_dir: str | Path,
+    allow_missing_trainables: bool = False,
+) -> list[str]:
     """Load only currently trainable tensors from a full or adapter checkpoint."""
 
     checkpoint_dir = Path(checkpoint_dir)
@@ -153,9 +228,9 @@ def load_trainable_initialization(model: torch.nn.Module, checkpoint_dir: str | 
     with safe_open(source_path, framework="pt", device="cpu") as handle:
         available = set(handle.keys())
         missing = sorted(trainable_names - available)
-        if missing:
+        if missing and not allow_missing_trainables:
             raise ValueError(f"Initialization checkpoint is missing trainable weights: {missing[:5]}")
-        for name in sorted(trainable_names):
+        for name in sorted(trainable_names & available):
             selected[name] = handle.get_tensor(name)
     _, unexpected = model.load_state_dict(selected, strict=False)
     if unexpected:

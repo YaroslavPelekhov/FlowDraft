@@ -6,7 +6,9 @@ minimum protocol for reporting its results.
 ## Method definition
 
 FlowDraft keeps the frozen Qwen3 autoregressive path and the Orthrus verifier.
-Only `q_proj_diff`, `k_proj_diff`, and `v_proj_diff` are trainable. Therefore,
+The baseline trains only `q_proj_diff`, `k_proj_diff`, and `v_proj_diff`.
+`cfm_v2` additionally trains a small residual state adapter that maps continuous
+categorical states into the frozen Qwen embedding space. Therefore,
 verification remains lossless: greedy output must be token-identical to the
 frozen AR path, independently of drafter quality.
 
@@ -18,28 +20,28 @@ For source and target times `0 <= s <= t <= 1`, it predicts a simplex endpoint
 X_s,t(x_s) = x_s + (t - s) / (1 - s) * (pi_s,t(x_s) - x_s).
 ```
 
-The implementation has the defining CFM components:
+The `cfm_v2` implementation has the defining CFM components:
 
-- explicit `(s,t)` sinusoidal conditioning of the partial denoiser;
-- straight-line categorical states between the mask prior and clean tokens;
+- RMS-normalized residual state adapter with FiLM `(s,t)` conditioning;
+- straight-line categorical states between the mask prior and clean endpoints;
 - diagonal endpoint training at `s=t`;
 - off-diagonal endpoint-consistent Lagrangian distillation (ECLD);
+- exact full-vocabulary endpoint expectation for off-diagonal transport;
+- explicit `(s,t)=(0,1)` supervision for the one-jump inference boundary;
 - one- or few-jump inference through the same endpoint transport equation;
 - unchanged frozen AR verification after drafting.
 
 ## Objective
 
-Training is staged.
+Training is staged, but the primary CFM ablation isolates the two terms below.
 
-1. Teacher-matching stage: all anchors use diagonal states. The primary loss is
-   forward KL from the frozen AR distribution. Prefix-weighted KL and a small
-   hard-label CE term emphasize early positions without replacing the soft
-   teacher objective.
+1. Teacher-VFM stage: all anchors use diagonal states `x_t`. The primary loss
+   is forward KL from the frozen AR distribution.
 2. Flow-map stage: 75% of blocks remain diagonal and 25% use `s<t`. The
-   off-diagonal objective is
+   off-diagonal ECLD objective is
 
 ```text
-L_ECLD = 4 * CE(stopgrad(pi_t,t(X_s,t)), pi_s,t(x_s))
+L_ECLD = 4 * w_t * CE(stopgrad(pi_t,t(X_s,t)), pi_s,t(x_s))
          + 2 * gamma^2 * ||d pi_s,t(x_s) / dt||^2,
 gamma = (t - s) / (1 - s).
 ```
@@ -47,30 +49,26 @@ gamma = (t - s) / (1 - s).
 The default loss is
 
 ```text
-L = L_teacher_KL
-    + 0.10 * L_hard_CE
-    + 0.25 * L_prefix_CE
-    + 0.50 * L_prefix_teacher_KL
-    + 0.10 * L_ECLD.
+L = L_teacher_VFM + lambda_ECLD * L_ECLD.
 ```
 
-This choice follows two empirical findings: Orthrus reports better drafting
-from soft teacher KL than hard CE, while Categorical Flow Maps reports stable
-low-NFE generation from ECLD with a 0.75 diagonal fraction.
+`w_t=(1-t)^-2` is clamped at a denominator of `0.05` in the paper-style
+configuration. A uniform-weight variant is retained only as an explicit
+stability ablation. Prefix and hard-label acceptance losses are separate
+ablations, not part of the base CFM claim.
 
 ## Single-A100 approximations
 
-Two numerical approximations are explicit in run metadata:
+One numerical approximation is explicit in run metadata:
 
-- The Qwen vocabulary simplex is projected to embedding space using a
-  renormalized top-32 distribution. A full `151k x hidden_size` expectation at
-  every block position is too expensive for one A100.
-- The ECLD temporal derivative is a forward finite difference. Full-model JVP
+- The ECLD temporal derivative is a boundary-safe finite difference. Full-model JVP
   through the released FlexAttention kernel is not supported by the target
   PyTorch stack.
 
-These approximations do not change the endpoint flow-map definition or the AR
-verifier. They must be disclosed when comparing against the original CFM paper.
+The former top-32 simplex approximation is retained only for legacy checkpoint
+reproduction. `cfm_v2` uses a chunked complete-vocabulary expectation. The
+finite-difference derivative must still be disclosed when comparing against the
+original CFM paper.
 
 ## Data protocol
 
@@ -112,9 +110,10 @@ The next statistically meaningful ablations are:
 
 1. teacher KL only versus prefix-weighted KL;
 2. CFM diagonal training versus ECLD;
-3. top-k endpoint projection at 16, 32, and 64;
+3. paper-clamped versus uniform ECLD time weights;
 4. one jump versus two jumps at equal measured forward-pass cost;
-5. offline training versus verification-error replay on draft-induced states.
+5. base CFM versus a separately introduced prefix-acceptance auxiliary;
+6. offline training versus verification-error replay on draft-induced states.
 
 The last item follows speculative-drafter literature: offline distillation can
 plateau because inference visits states induced by drafter errors. It should be

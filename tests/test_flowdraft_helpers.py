@@ -2,6 +2,7 @@ import torch
 
 from orthrus_training.flowdraft import (
     add_flow_time_conditioning,
+    exact_endpoint_embeddings,
     flow_map_step_size,
     make_flowdraft_batch,
     make_flowdraft_inputs_embeds,
@@ -9,6 +10,7 @@ from orthrus_training.flowdraft import (
     topk_endpoint_embeddings,
     transport_categorical_state,
 )
+from orthrus_training.modeling import FlowDraftStateAdapter
 from orthrus_training.losses import (
     prefix_acceptance_metrics,
     prefix_survival_cross_entropy,
@@ -109,6 +111,21 @@ def test_cfm_time_pairs_have_diagonal_and_ordered_off_diagonal_blocks():
     assert torch.all(target[~diagonal] > source[~diagonal])
 
 
+def test_cfm_time_pairs_reserve_exact_one_jump_pairs():
+    torch.manual_seed(11)
+    source, target, diagonal = sample_cfm_time_pairs(
+        batch_size=2,
+        num_blocks=8,
+        diagonal_fraction=0.75,
+        one_jump_fraction=0.5,
+        device=torch.device("cpu"),
+    )
+
+    one_jump = (source.squeeze(-1).squeeze(-1) == 0.0) & (target.squeeze(-1).squeeze(-1) == 1.0)
+    assert torch.all(~one_jump | ~diagonal)
+    assert one_jump.sum(dim=1).tolist() == [1, 1]
+
+
 def test_endpoint_flow_map_reaches_endpoint_at_t_one():
     source = torch.tensor([[[[0.25, 0.75]]]])
     endpoint = torch.tensor([[[[0.9, 0.1]]]])
@@ -127,6 +144,15 @@ def test_topk_endpoint_embeddings_preserve_simplex_average():
     assert torch.allclose(projected, expected, atol=1e-6)
 
 
+def test_exact_endpoint_embeddings_match_full_softmax_expectation():
+    logits = torch.tensor([[[0.0, 2.0, 1.0, -1.0]]])
+    embeddings = torch.tensor([[1.0, 0.0], [0.0, 2.0], [3.0, 3.0], [-1.0, 1.0]])
+    projected = exact_endpoint_embeddings(logits, embeddings, vocab_chunk_size=2)
+    expected = torch.softmax(logits, dim=-1) @ embeddings
+
+    assert torch.allclose(projected, expected, atol=1e-6)
+
+
 def test_flow_time_conditioning_is_explicit_and_shape_stable():
     inputs = torch.ones((1, 8, 8))
     source = torch.zeros((1, 2, 1, 1))
@@ -135,3 +161,11 @@ def test_flow_time_conditioning_is_explicit_and_shape_stable():
 
     assert conditioned.shape == inputs.shape
     assert not torch.equal(conditioned, inputs)
+
+
+def test_state_adapter_is_an_identity_at_initialization():
+    adapter = FlowDraftStateAdapter(hidden_size=8, bottleneck_size=4)
+    inputs = torch.randn((1, 8, 8))
+    time = torch.randn((1, 2, 8))
+
+    assert torch.allclose(adapter(inputs, time, block_size=4), inputs)

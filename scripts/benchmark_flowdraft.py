@@ -41,7 +41,8 @@ from transformers.cache_utils import DynamicCache
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from orthrus_training.flowdraft import (
-    add_flow_time_conditioning,
+    condition_flowdraft_state,
+    exact_endpoint_embeddings,
     make_discrete_flowdraft_state,
     topk_endpoint_embeddings,
     transport_categorical_state,
@@ -220,7 +221,8 @@ def generate_flowdraft_greedy(
                 target_time_value = (flow_index + 1) / max(1, flow_steps)
                 source_time = torch.full((1, 1, 1, 1), source_time_value, device=device)
                 target_time = torch.full((1, 1, 1, 1), target_time_value, device=device)
-                conditioned = add_flow_time_conditioning(
+                conditioned = condition_flowdraft_state(
+                    model,
                     raw_state_embeds,
                     source_time,
                     target_time,
@@ -255,11 +257,18 @@ def generate_flowdraft_greedy(
                 endpoint_logits = diff_outputs.logits[:, :-1, :]
                 draft_tokens = sample_greedy(endpoint_logits)
                 if use_cfm and flow_index + 1 < max(1, flow_steps):
-                    endpoint_embeds = topk_endpoint_embeddings(
-                        endpoint_logits,
-                        model.model.embed_tokens.weight,
-                        topk=endpoint_topk,
-                    )
+                    endpoint_transport = getattr(model.config, "flowdraft_endpoint_transport", "topk")
+                    if endpoint_transport == "dense":
+                        endpoint_embeds = exact_endpoint_embeddings(
+                            endpoint_logits,
+                            model.model.embed_tokens.weight,
+                        )
+                    else:
+                        endpoint_embeds = topk_endpoint_embeddings(
+                            endpoint_logits,
+                            model.model.embed_tokens.weight,
+                            topk=endpoint_topk,
+                        )
                     transported = transport_categorical_state(
                         raw_state_embeds[:, 1:, :],
                         endpoint_embeds,

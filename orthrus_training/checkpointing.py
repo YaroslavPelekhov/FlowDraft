@@ -86,6 +86,10 @@ def _write_trainable_checkpoint(
             getattr(model.config, "flowdraft_time_conditioning_scale", 0.0)
         ),
         "flowdraft_endpoint_topk": int(getattr(model.config, "flowdraft_endpoint_topk", 32)),
+        "flowdraft_endpoint_transport": getattr(model.config, "flowdraft_endpoint_transport", "topk"),
+        "flowdraft_state_adapter": bool(getattr(model.config, "flowdraft_state_adapter", False)),
+        "flowdraft_adapter_bottleneck": int(getattr(model.config, "flowdraft_adapter_bottleneck", 256)),
+        "flowdraft_one_jump_fraction": float(getattr(model.config, "flowdraft_one_jump_fraction", 0.0)),
         "trainable_parameter_names": sorted(trainable_state),
     }
     with (output_dir / "adapter_config.json").open("w", encoding="utf-8") as handle:
