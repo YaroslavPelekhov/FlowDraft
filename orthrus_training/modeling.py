@@ -215,12 +215,14 @@ def flowtree_ar_verifier_mode(model: torch.nn.Module, visibility: torch.Tensor):
 
         def tree_mask_fn(b, h, q_idx, kv_idx):
             is_kv_ar = kv_idx < ar_len
-            valid_ar = is_kv_ar & (kv_idx <= causal_limit[b, q_idx])
+            safe_query_idx = q_idx.clamp(0, visibility.shape[0] - 1)
+            valid_query = q_idx < visibility.shape[0]
+            valid_ar = is_kv_ar & valid_query & (kv_idx <= causal_limit[b, safe_query_idx])
             draft_kv_idx = kv_idx - ar_len
             # FlexAttention evaluates both sides of ``&``. Clamp prompt-KV
             # indices before the table lookup, then gate them out below.
             safe_tree_idx = draft_kv_idx.clamp(0, visibility.shape[1] - 1)
-            valid_tree = (~is_kv_ar) & visibility[q_idx, safe_tree_idx]
+            valid_tree = (~is_kv_ar) & valid_query & visibility[safe_query_idx, safe_tree_idx]
             return valid_ar | valid_tree
 
         return upstream.create_block_mask(
