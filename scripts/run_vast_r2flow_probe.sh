@@ -24,8 +24,11 @@ OUT_DIR="${OUT_DIR:-/workspace/flowdraft_runs/r2flow_probe_100_r1}"
 MAX_STEPS="${MAX_STEPS:-100}"
 
 if [ -e "$OUT_DIR" ]; then
-  log "Refusing to overwrite existing output: $OUT_DIR"
-  exit 2
+  existing_entries="$(find "$OUT_DIR" -mindepth 1 -maxdepth 1 -printf '%f\n' | grep -vx 'run.log' || true)"
+  if [ -n "$existing_entries" ]; then
+    log "Refusing to overwrite existing output: $OUT_DIR"
+    exit 2
+  fi
 fi
 if [ ! -f "$INIT_CHECKPOINT/adapter_config.json" ]; then
   log "Missing frozen FlowDraft parent: $INIT_CHECKPOINT"
