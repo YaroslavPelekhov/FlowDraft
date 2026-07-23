@@ -30,6 +30,7 @@ from orthrus_training.flowdraft import (
     make_discrete_flowdraft_state,
     sample_categorical_source_tokens,
 )
+from orthrus_training.candidate_support import RescueCandidateBank, select_candidate_support
 from orthrus_training.modeling import dtype_from_string, load_flowdraft_adapter, load_tokenizer
 from orthrus_training.simplex_flow import SimplexFlowRefiner, simplex_flow_step
 
@@ -70,11 +71,14 @@ def load_head(path: str | Path, device: torch.device, dtype: torch.dtype):
         num_heads=int(config["num_heads"]), dropout=float(config.get("dropout", 0.0)),
     )
     head.load_state_dict(load_file(path / "simplex_flow.safetensors"), strict=True)
-    return head.to(device=device, dtype=dtype).eval(), config
+    bank = None
+    if (path / "rescue_bank.safetensors").exists():
+        bank = RescueCandidateBank.load(path, device=device)
+    return head.to(device=device, dtype=dtype).eval(), config, bank
 
 
 @torch.inference_mode()
-def generate_simplex_flow_greedy(model, head, input_ids, max_new_tokens, eos_token_id, flow_steps, parity_margin_threshold):
+def generate_simplex_flow_greedy(model, head, rescue_bank, input_ids, max_new_tokens, eos_token_id, flow_steps, parity_margin_threshold):
     device = input_ids.device
     block_size, mask_id = int(model.config.block_size), int(model.config.mask_token_id)
     source_prior = str(getattr(model.config, "flowdraft_source_prior", "uniform"))
@@ -115,7 +119,9 @@ def generate_simplex_flow_greedy(model, head, input_ids, max_new_tokens, eos_tok
         )
         qwen_forwards += 1
         if diff_len > 1:
-            values, candidates = draft.logits[:, :-1, :].topk(head.candidate_count, dim=-1)
+            values, candidates = select_candidate_support(
+                draft.logits[:, :-1, :], head.candidate_count, rescue_bank
+            )
             if diff_len == block_size:
                 state = torch.full_like(values, 1.0 / head.candidate_count)
                 flow_values = values.reshape(1, 1, diff_len - 1, head.candidate_count)
@@ -186,18 +192,18 @@ def main():
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = dtype_from_string(args.dtype)
-    head, config = load_head(args.checkpoint, device, dtype)
+    head, config, rescue_bank = load_head(args.checkpoint, device, dtype)
     parent = args.base_checkpoint or config["base_flowdraft_checkpoint"]
     model, metadata, _ = load_flowdraft_adapter(parent, args.upstream_dir, dtype, args.attn_implementation)
     model = model.to(device=device, dtype=dtype).eval()
     tokenizer, prompts = load_tokenizer(metadata["base_model"]), load_prompts(args.prompts_jsonl)
     for row in prompts[:args.warmup_prompts]:
-        generate_simplex_flow_greedy(model, head, encode_prompt(tokenizer, row["prompt"], device), min(16, args.max_new_tokens), tokenizer.eos_token_id, args.flow_steps, args.parity_margin_threshold)
+        generate_simplex_flow_greedy(model, head, rescue_bank, encode_prompt(tokenizer, row["prompt"], device), min(16, args.max_new_tokens), tokenizer.eos_token_id, args.flow_steps, args.parity_margin_threshold)
     rows = []
     for row in prompts:
         encoded = encode_prompt(tokenizer, row["prompt"], device)
         ar_ids, ar_seconds, ar_forwards = generate_ar_greedy(model, encoded, args.max_new_tokens, tokenizer.eos_token_id)
-        draft_ids, seconds, forwards, head_calls, accepts = generate_simplex_flow_greedy(model, head, encoded, args.max_new_tokens, tokenizer.eos_token_id, args.flow_steps, args.parity_margin_threshold)
+        draft_ids, seconds, forwards, head_calls, accepts = generate_simplex_flow_greedy(model, head, rescue_bank, encoded, args.max_new_tokens, tokenizer.eos_token_id, args.flow_steps, args.parity_margin_threshold)
         ar_new, draft_new = int(ar_ids.shape[1] - encoded.shape[1]), int(draft_ids.shape[1] - encoded.shape[1])
         record = {"id": row["id"], "parity_ok": bool(torch.equal(ar_ids, draft_ids)), "first_mismatch_at": first_mismatch(ar_ids, draft_ids), "ar_tokens": ar_new, "simplex_flow_tokens": draft_new, "ar_seconds": ar_seconds, "simplex_flow_seconds": seconds, "speedup": ((draft_new / seconds) / (ar_new / ar_seconds)) if ar_new and ar_seconds and seconds else 0.0, "ar_forward_passes": ar_forwards, "qwen_forward_passes": forwards, "simplex_head_calls": head_calls, "tpf": draft_new / forwards if forwards else 0.0, "acceptance": accepts, "acceptance_mean": statistics.mean(accepts) if accepts else 0.0}
         rows.append(record); print(json.dumps(record), flush=True)
@@ -205,7 +211,7 @@ def main():
     total_ar_seconds, total_seconds = sum(x["ar_seconds"] for x in rows), sum(x["simplex_flow_seconds"] for x in rows)
     total_forwards = sum(x["qwen_forward_passes"] for x in rows)
     accepted = [v for x in rows for v in x["acceptance"]]
-    summary = {"method": "local-simplex categorical flow map", "checkpoint": str(Path(args.checkpoint).resolve()), "base_checkpoint": str(parent), "num_prompts": len(rows), "flow_steps": args.flow_steps, "parity_rate": sum(x["parity_ok"] for x in rows) / len(rows) if rows else 0.0, "aggregate_speedup": ((total_tokens / total_seconds) / (total_ar_tokens / total_ar_seconds)) if total_tokens and total_seconds and total_ar_seconds else 0.0, "aggregate_tpf": total_tokens / total_forwards if total_forwards else 0.0, "weighted_acceptance": sum(accepted) / len(accepted) if accepted else 0.0, "total_qwen_forward_passes": total_forwards, "total_simplex_head_calls": sum(x["simplex_head_calls"] for x in rows)}
+    summary = {"method": "local-simplex categorical flow map", "checkpoint": str(Path(args.checkpoint).resolve()), "base_checkpoint": str(parent), "candidate_support": "topk_plus_rescue" if rescue_bank is not None else "topk_only", "num_prompts": len(rows), "flow_steps": args.flow_steps, "parity_rate": sum(x["parity_ok"] for x in rows) / len(rows) if rows else 0.0, "aggregate_speedup": ((total_tokens / total_seconds) / (total_ar_tokens / total_ar_seconds)) if total_tokens and total_seconds and total_ar_seconds else 0.0, "aggregate_tpf": total_tokens / total_forwards if total_forwards else 0.0, "weighted_acceptance": sum(accepted) / len(accepted) if accepted else 0.0, "total_qwen_forward_passes": total_forwards, "total_simplex_head_calls": sum(x["simplex_head_calls"] for x in rows)}
     print("SUMMARY " + json.dumps(summary), flush=True)
     if args.output_jsonl:
         with Path(args.output_jsonl).open("w", encoding="utf-8") as handle:

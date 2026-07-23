@@ -1,0 +1,27 @@
+# Local CFM with a fixed 96+32 train-derived rescue candidate support.
+max_steps: 300
+batch_size: 1
+num_anchor_blocks: 32
+candidate_count: 128
+hidden_size: 512
+num_layers: 3
+num_heads: 8
+dropout: 0.0
+learning_rate: 3.0e-4
+warmup_ratio: 0.08
+weight_decay: 0.01
+max_grad_norm: 1.0
+root_ce_weight: 1.0
+diagonal_ce_weight: 0.5
+ecld_weight: 0.25
+temporal_weight: 0.02
+prefix_weight_decay: 0.9
+dtype: bf16
+attn_implementation: eager
+eval_every: 50
+eval_batches: 8
+eval_anchor_blocks: 32
+early_stopping_patience: 3
+seed: 421
+num_workers: 2
+log_every: 10

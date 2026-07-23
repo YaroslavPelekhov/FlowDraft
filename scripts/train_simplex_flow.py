@@ -20,17 +20,12 @@ from transformers import get_cosine_schedule_with_warmup, set_seed
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from orthrus_training.data import PackedTokenDataset, assert_disjoint_packed_manifests, sample_anchor_positions
-from orthrus_training.flowdraft import (
-    condition_flowdraft_state,
-    make_flowdraft_batch,
-    make_flowdraft_inputs_embeds,
-    sample_categorical_source_tokens,
-    select_endpoint_logits,
-)
+from orthrus_training.candidate_support import RescueCandidateBank, select_candidate_support
+from orthrus_training.data import PackedTokenDataset, assert_disjoint_packed_manifests
 from orthrus_training.losses import prefix_survival_weights
 from orthrus_training.modeling import dtype_from_string, load_flowdraft_adapter
 from orthrus_training.simplex_flow import SimplexFlowRefiner, local_simplex_path, simplex_flow_step
+from orthrus_training.simplex_flow_data import collect_base_draft_logits
 
 
 def parse_args():
@@ -45,6 +40,11 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-anchor-blocks", type=int, default=32)
     parser.add_argument("--candidate-count", type=int, default=128)
+    parser.add_argument(
+        "--rescue-bank",
+        default=None,
+        help="Optional train-derived rescue candidate bank; copied into best and last checkpoints.",
+    )
     parser.add_argument("--hidden-size", type=int, default=512)
     parser.add_argument("--num-layers", type=int, default=3)
     parser.add_argument("--num-heads", type=int, default=8)
@@ -104,7 +104,12 @@ def sha256(path: Path) -> str | None:
     return digest.hexdigest()
 
 
-def save_checkpoint(head: SimplexFlowRefiner, directory: Path, config: dict) -> None:
+def save_checkpoint(
+    head: SimplexFlowRefiner,
+    directory: Path,
+    config: dict,
+    rescue_bank: RescueCandidateBank | None = None,
+) -> None:
     temporary = directory.with_name(f".{directory.name}.tmp")
     previous = directory.with_name(f".{directory.name}.previous")
     for candidate in (temporary, previous):
@@ -112,6 +117,8 @@ def save_checkpoint(head: SimplexFlowRefiner, directory: Path, config: dict) -> 
             shutil.rmtree(candidate)
     temporary.mkdir(parents=True)
     save_file({name: value.detach().cpu().contiguous() for name, value in head.state_dict().items()}, temporary / "simplex_flow.safetensors")
+    if rescue_bank is not None:
+        rescue_bank.save(temporary)
     write_json(temporary / "simplex_flow_config.json", config)
     if directory.exists():
         directory.rename(previous)
@@ -126,37 +133,20 @@ def save_checkpoint(head: SimplexFlowRefiner, directory: Path, config: dict) -> 
 
 
 @torch.no_grad()
-def collect_candidates(model, input_ids: torch.Tensor, num_blocks: int, candidate_count: int, generator: torch.Generator):
-    block_size = int(model.config.block_size)
-    anchors = sample_anchor_positions(input_ids.shape[0], input_ids.shape[1], block_size, num_blocks, input_ids.device)
-    clean, positions, limits, teacher_positions, _ = make_flowdraft_batch(input_ids, anchors, block_size)
-    source = sample_categorical_source_tokens(
-        clean, int(model.config.vocab_size), int(model.config.mask_token_id),
-        prior=str(getattr(model.config, "flowdraft_source_prior", "uniform")), generator=generator,
-    )
-    source_time = torch.zeros((input_ids.shape[0], num_blocks, 1, 1), device=input_ids.device)
-    target_time = torch.ones_like(source_time)
-    flow_inputs = make_flowdraft_inputs_embeds(model, clean, int(model.config.mask_token_id), source_time, source_token_ids=source)
-    flow_inputs = condition_flowdraft_state(
-        model, flow_inputs, source_time, target_time, block_size,
-        float(getattr(model.config, "flowdraft_time_conditioning_scale", 0.0)),
-    )
-    context = model(input_ids=input_ids, use_cache=True, is_diffusion_pass=False)
-    teacher = torch.gather(
-        context.logits, 1,
-        teacher_positions.unsqueeze(-1).expand(-1, -1, context.logits.shape[-1]),
-    ).argmax(dim=-1)
-    draft = model(
-        inputs_embeds=flow_inputs, position_ids=positions, past_key_values=context.past_key_values,
-        use_cache=False, is_diffusion_pass=True, causal_limit=limits, ar_seq_len=input_ids.shape[1],
-    )
-    logits = select_endpoint_logits(draft.logits, block_size)
-    values, ids = logits.topk(candidate_count, dim=-1)
+def collect_candidates(
+    model,
+    input_ids: torch.Tensor,
+    num_blocks: int,
+    candidate_count: int,
+    generator: torch.Generator,
+    rescue_bank: RescueCandidateBank | None = None,
+):
+    logits, teacher = collect_base_draft_logits(model, input_ids, num_blocks, generator)
+    values, ids = select_candidate_support(logits, candidate_count, rescue_bank)
     matches = ids.eq(teacher.unsqueeze(-1))
     covered = matches.any(dim=-1)
     local_target = matches.to(torch.int64).argmax(dim=-1)
-    shape = (input_ids.shape[0], num_blocks, block_size - 1)
-    return values.reshape(*shape, candidate_count), ids.reshape(*shape, candidate_count), local_target.reshape(shape), covered.reshape(shape)
+    return values, ids, local_target, covered
 
 
 def weighted_masked_ce(probabilities, targets, covered, prefix_weights):
@@ -205,14 +195,17 @@ def flow_losses(head, values, targets, covered, prefix_weights, args):
 
 
 @torch.no_grad()
-def evaluate(model, head, loader, args, generator):
+def evaluate(model, head, loader, args, generator, rescue_bank=None):
     head.eval()
     prefixes, firsts, coverages = [], [], []
     weights = prefix_survival_weights(int(model.config.block_size), args.prefix_weight_decay, torch.device("cuda"))
     for index, raw in enumerate(loader):
         if index >= args.eval_batches:
             break
-        values, _, targets, covered = collect_candidates(model, raw.to("cuda", non_blocking=True), args.eval_anchor_blocks, args.candidate_count, generator)
+        values, _, targets, covered = collect_candidates(
+            model, raw.to("cuda", non_blocking=True), args.eval_anchor_blocks,
+            args.candidate_count, generator, rescue_bank,
+        )
         time = torch.zeros(values.shape[:-1], device=values.device)
         proposal = head(values, torch.full_like(values, 1.0 / values.shape[-1]), time, torch.ones_like(time)).argmax(dim=-1)
         correct = proposal.eq(targets) & covered
@@ -242,6 +235,9 @@ def main():
     model.to("cuda", dtype=dtype).train()
     for parameter in model.parameters():
         parameter.requires_grad_(False)
+    rescue_bank = RescueCandidateBank.load(args.rescue_bank, device="cuda") if args.rescue_bank else None
+    if rescue_bank is not None and rescue_bank.base_candidate_count >= args.candidate_count:
+        raise ValueError("rescue bank requires candidate_count greater than its base_candidate_count")
     head = SimplexFlowRefiner(int(model.config.block_size), args.candidate_count, args.hidden_size, args.num_layers, args.num_heads, args.dropout).to("cuda", dtype=dtype).train()
     optimizer = torch.optim.AdamW(head.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     scheduler = get_cosine_schedule_with_warmup(optimizer, max(1, round(args.max_steps * args.warmup_ratio)), args.max_steps)
@@ -253,6 +249,8 @@ def main():
         "base_flowdraft_checkpoint": str(Path(args.init_checkpoint).resolve()),
         "base_flowdraft_adapter_sha256": sha256(Path(args.init_checkpoint) / "adapter_model.safetensors"),
         "block_size": int(model.config.block_size), "candidate_count": args.candidate_count,
+        "rescue_bank": str(Path(args.rescue_bank).resolve()) if args.rescue_bank else None,
+        "candidate_support": "parent_topk_only" if rescue_bank is None else "parent_topk_plus_train_derived_rescue_tokens",
         "inference": "one frozen Orthrus diffusion pass, cheap local-simplex CFM steps, one frozen AR verifier; strict greedy verifier preserves parity",
         "parent_adapter_metadata": parent_metadata, "train_unique_sequences": train_unique, "eval_unique_sequences": eval_unique,
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -269,7 +267,10 @@ def main():
     try:
         for raw in train_loader:
             step += 1
-            values, _, targets, covered = collect_candidates(model, raw.to("cuda", non_blocking=True), args.num_anchor_blocks, args.candidate_count, train_generator)
+            values, _, targets, covered = collect_candidates(
+                model, raw.to("cuda", non_blocking=True), args.num_anchor_blocks,
+                args.candidate_count, train_generator, rescue_bank,
+            )
             loss, terms = flow_losses(head, values, targets, covered, weights, args)
             loss.backward(); torch.nn.utils.clip_grad_norm_(head.parameters(), args.max_grad_norm)
             optimizer.step(); scheduler.step(); optimizer.zero_grad(set_to_none=True); progress.update(1)
@@ -279,12 +280,14 @@ def main():
             if step % args.log_every == 0:
                 print("TRAIN " + json.dumps(record), flush=True)
             if step % args.eval_every == 0 or step == args.max_steps:
-                evaluation = evaluate(model, head, eval_loader, args, eval_generator) | {"step": step}
+                evaluation = evaluate(model, head, eval_loader, args, eval_generator, rescue_bank) | {"step": step}
                 metrics_file.write(json.dumps(evaluation) + "\n"); metrics_file.flush(); print("EVAL " + json.dumps(evaluation), flush=True)
                 metric = evaluation["eval_greedy_prefix_acceptance"]
                 if metric > best:
                     best, best_step, stale = metric, step, 0
-                    save_checkpoint(head, output / "best", config | {"best_step": best_step, "best_metric": best})
+                    save_checkpoint(
+                        head, output / "best", config | {"best_step": best_step, "best_metric": best}, rescue_bank
+                    )
                 else:
                     stale += 1
                 if args.early_stopping_patience and stale >= args.early_stopping_patience:
@@ -293,7 +296,7 @@ def main():
                 break
     finally:
         progress.close(); metrics_file.close()
-    save_checkpoint(head, output / "last", config | {"last_step": step})
+    save_checkpoint(head, output / "last", config | {"last_step": step}, rescue_bank)
     manifest = json.loads((output / "run_manifest.json").read_text())
     manifest.update({"status": "completed", "completed_at_utc": datetime.now(timezone.utc).isoformat(), "best_step": best_step, "best_metric": best, "last_step": step})
     write_json(output / "run_manifest.json", manifest)
