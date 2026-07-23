@@ -1,0 +1,35 @@
+# Architecture screen for a one-verifier EAGLE-conditioned endpoint Flow Map.
+# It trains on the disjoint 50k/2048 packed split; only a strict 100% parity
+# benchmark may promote it to the longer run.
+max_steps: 300
+batch_size: 1
+num_anchor_blocks: 32
+learning_rate: 1.5e-4
+warmup_ratio: 0.08
+weight_decay: 0.01
+max_grad_norm: 1.0
+hidden_loss_weight: 0.20
+embedding_loss_weight: 0.03
+prefix_loss_weight: 1.0
+prefix_weight_decay: 0.92
+state_size: 1024
+num_layers: 4
+num_heads: 8
+dropout: 0.0
+teacher_forcing_start: 1.0
+teacher_forcing_end: 0.20
+teacher_forcing_decay_ratio: 0.50
+feedback_mode: advanced_token
+flow_diagonal_fraction: 0.25
+flow_diagonal_loss_weight: 0.10
+flow_consistency_weight: 0.05
+flow_time_min: 0.05
+dtype: bf16
+attn_implementation: eager
+eval_every: 100
+eval_batches: 16
+eval_anchor_blocks: 32
+early_stopping_patience: 4
+seed: 281
+num_workers: 2
+log_every: 10

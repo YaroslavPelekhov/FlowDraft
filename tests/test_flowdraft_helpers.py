@@ -16,6 +16,7 @@ from orthrus_training.modeling import FlowDraftStateAdapter
 from orthrus_training.residual_flow import ResidualFlowCorrector, verifier_margin
 from orthrus_training.cacheflow import CacheFlowTrajectoryHead, flow_source_from_context
 from orthrus_training.hydraflow import HydraFlowDrafter
+from orthrus_training.eagleflow import EagleFlowDrafter
 from orthrus_training.flowtree import (
     ancestor_matrix,
     build_flowtree,
@@ -332,4 +333,26 @@ def test_hydraflow_self_conditioned_rollout_has_a_correlated_trajectory():
 
     assert free_hidden.shape == forced_hidden.shape == (2, 3, 4, 8)
     assert free_embeddings.shape == forced_embeddings.shape == (2, 3, 4, 8)
+    assert not torch.allclose(free_hidden[:, :, 1:], forced_hidden[:, :, 1:])
+
+
+def test_eagleflow_attention_trajectory_uses_feature_and_token_feedback():
+    head = EagleFlowDrafter(hidden_size=8, block_size=5, state_size=8, num_layers=2, num_heads=2)
+    context = torch.randn((2, 3, 8))
+    anchor = torch.randn((2, 3, 8))
+    teacher_embeddings = torch.randn((2, 3, 4, 8))
+    teacher_features = torch.randn((2, 3, 4, 8))
+
+    free_hidden, free_embeddings = head.rollout(context, anchor)
+    forced_hidden, forced_embeddings = head.rollout(
+        context,
+        anchor,
+        teacher_embeddings=teacher_embeddings,
+        teacher_features=teacher_features,
+        teacher_forcing_ratio=1.0,
+    )
+
+    assert free_hidden.shape == forced_hidden.shape == (2, 3, 4, 8)
+    assert free_embeddings.shape == forced_embeddings.shape == (2, 3, 4, 8)
+    assert torch.isfinite(free_hidden).all()
     assert not torch.allclose(free_hidden[:, :, 1:], forced_hidden[:, :, 1:])
