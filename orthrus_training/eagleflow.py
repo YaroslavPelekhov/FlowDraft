@@ -173,3 +173,130 @@ class EagleFlowDrafter(nn.Module):
                 token = predicted_token.reshape(flat, self.hidden_size)
                 feature = predicted_feature.reshape(flat, self.hidden_size)
         return torch.stack(hidden_outputs, dim=2), torch.stack(embedding_outputs, dim=2)
+
+
+class ParallelFeatureTokenAttention(nn.Module):
+    """Causal block attention evaluated in one fused operation."""
+
+    def __init__(self, hidden_size: int, state_size: int, num_heads: int, dropout: float) -> None:
+        super().__init__()
+        if state_size % num_heads:
+            raise ValueError("state_size must be divisible by num_heads")
+        self.hidden_size = hidden_size
+        self.state_size = state_size
+        self.num_heads = num_heads
+        self.head_dim = state_size // num_heads
+        self.feature_norm = nn.LayerNorm(hidden_size)
+        self.token_norm = nn.LayerNorm(hidden_size)
+        self.q_proj = nn.Linear(hidden_size * 2, state_size, bias=False)
+        self.k_proj = nn.Linear(hidden_size * 2, state_size, bias=False)
+        self.v_proj = nn.Linear(hidden_size * 2, state_size, bias=False)
+        self.o_proj = nn.Linear(state_size, hidden_size, bias=False)
+        self.post_norm = nn.LayerNorm(hidden_size)
+        self.gate_proj = nn.Linear(hidden_size, state_size * 2, bias=False)
+        self.up_proj = nn.Linear(hidden_size, state_size * 2, bias=False)
+        self.down_proj = nn.Linear(state_size * 2, hidden_size, bias=False)
+        self.dropout = dropout
+
+    def forward(self, feature: torch.Tensor, token_embedding: torch.Tensor) -> torch.Tensor:
+        batch, length, _ = feature.shape
+        pair = torch.cat((self.feature_norm(feature), self.token_norm(token_embedding)), dim=-1)
+        query = self.q_proj(pair).reshape(batch, length, self.num_heads, self.head_dim).transpose(1, 2)
+        key = self.k_proj(pair).reshape(batch, length, self.num_heads, self.head_dim).transpose(1, 2)
+        value = self.v_proj(pair).reshape(batch, length, self.num_heads, self.head_dim).transpose(1, 2)
+        attended = F.scaled_dot_product_attention(query, key, value, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
+        attended = attended.transpose(1, 2).reshape(batch, length, self.state_size)
+        feature = feature + F.dropout(self.o_proj(attended), self.dropout, self.training)
+        normalized = self.post_norm(feature)
+        update = self.down_proj(F.silu(self.gate_proj(normalized)) * self.up_proj(normalized))
+        return feature + F.dropout(update, self.dropout, self.training)
+
+
+class ParallelEagleFlowDrafter(nn.Module):
+    """One-pass block Flow Map with parallel continuous token refinement.
+
+    The head never calls the frozen vocabulary projection internally.  Instead,
+    each attention layer shifts its own continuous token endpoint one position
+    right.  Thus all K-1 future positions are drafted in one head pass while
+    still receiving an autoregressive-like advanced-token signal.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        block_size: int,
+        state_size: int = 768,
+        num_layers: int = 3,
+        num_heads: int = 12,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if hidden_size <= 0 or block_size < 2 or state_size <= 0 or num_layers <= 0:
+            raise ValueError("hidden_size, block_size, state_size, and num_layers must be positive")
+        self.hidden_size = hidden_size
+        self.block_size = block_size
+        self.prediction_length = block_size - 1
+        self.state_size = state_size
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+        self.position = nn.Parameter(torch.zeros(1, self.prediction_length, hidden_size))
+        self.source_tokens = nn.Parameter(torch.zeros(1, self.prediction_length - 1, hidden_size))
+        self.context_norm = nn.LayerNorm(hidden_size)
+        self.layers = nn.ModuleList(
+            ParallelFeatureTokenAttention(hidden_size, state_size, num_heads, dropout) for _ in range(num_layers)
+        )
+        self.token_norm = nn.LayerNorm(hidden_size)
+        self.embedding_endpoint = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.source_norm = nn.LayerNorm(hidden_size)
+        self.source_residual = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.flow_norm = nn.LayerNorm(hidden_size * 2)
+        self.flow_time = nn.Sequential(nn.Linear(1, state_size), nn.SiLU(), nn.Linear(state_size, hidden_size))
+        self.flow_hidden = nn.Sequential(nn.Linear(hidden_size * 2, state_size), nn.SiLU(), nn.Linear(state_size, hidden_size))
+        nn.init.normal_(self.source_tokens, std=0.02)
+        nn.init.zeros_(self.source_residual.weight)
+        nn.init.zeros_(self.flow_hidden[-1].weight)
+        nn.init.zeros_(self.flow_hidden[-1].bias)
+        nn.init.zeros_(self.flow_time[-1].weight)
+        nn.init.zeros_(self.flow_time[-1].bias)
+
+    def rollout(
+        self,
+        context_hidden: torch.Tensor,
+        anchor_embeddings: torch.Tensor,
+        teacher_embeddings: torch.Tensor | None = None,
+        teacher_features: torch.Tensor | None = None,
+        teacher_forcing_ratio: float = 0.0,
+        feedback_embedding_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        flow_targets: torch.Tensor | None = None,
+        flow_time: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del teacher_embeddings, teacher_features, teacher_forcing_ratio, feedback_embedding_fn
+        if context_hidden.shape != anchor_embeddings.shape:
+            raise ValueError("context_hidden and anchor_embeddings must have identical shapes")
+        if context_hidden.dim() != 3 or context_hidden.shape[-1] != self.hidden_size:
+            raise ValueError("context_hidden must have shape [B, blocks, hidden_size]")
+        expected = context_hidden.shape[:2] + (self.prediction_length, self.hidden_size)
+        if flow_targets is not None and flow_targets.shape != expected:
+            raise ValueError(f"Expected flow_targets shape {expected}, got {tuple(flow_targets.shape)}")
+        batch_size, blocks, _ = context_hidden.shape
+        if flow_time is None:
+            flow_time = torch.zeros((batch_size, blocks, 1), device=context_hidden.device, dtype=context_hidden.dtype)
+        if flow_time.shape != (batch_size, blocks, 1):
+            raise ValueError("flow_time must have shape [B, blocks, 1]")
+        flat = batch_size * blocks
+        feature = self.context_norm(context_hidden).reshape(flat, 1, self.hidden_size)
+        feature = feature.expand(-1, self.prediction_length, -1) + self.position
+        anchor = anchor_embeddings.reshape(flat, 1, self.hidden_size)
+        token = torch.cat((anchor, self.source_tokens.expand(flat, -1, -1)), dim=1)
+        for layer in self.layers:
+            feature = layer(feature, token)
+            continuous = self.embedding_endpoint(self.token_norm(feature))
+            token = torch.cat((anchor, continuous[:, :-1, :].detach()), dim=1)
+        source = feature + self.source_residual(self.source_norm(feature))
+        source = source.reshape(batch_size, blocks, self.prediction_length, self.hidden_size)
+        interpolant = source if flow_targets is None else (1.0 - flow_time.unsqueeze(2)) * source + flow_time.unsqueeze(2) * flow_targets
+        flow_pair = torch.cat((source, interpolant), dim=-1)
+        flow_update = self.flow_hidden(self.flow_norm(flow_pair))
+        flow_update = flow_update + self.flow_time(flow_time.reshape(flat, 1)).reshape(batch_size, blocks, 1, self.hidden_size)
+        hidden = source + flow_update
+        return hidden, continuous.reshape(batch_size, blocks, self.prediction_length, self.hidden_size)

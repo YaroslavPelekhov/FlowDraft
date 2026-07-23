@@ -20,7 +20,7 @@ from transformers import get_cosine_schedule_with_warmup, set_seed
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from orthrus_training.data import PackedTokenDataset, assert_disjoint_packed_manifests
-from orthrus_training.eagleflow import EagleFlowDrafter
+from orthrus_training.eagleflow import EagleFlowDrafter, ParallelEagleFlowDrafter
 from orthrus_training.losses import forward_kl_distillation, prefix_acceptance_metrics, prefix_survival_cross_entropy
 from orthrus_training.modeling import dtype_from_string, load_flowdraft_adapter
 from train_hydraflow import (
@@ -58,6 +58,7 @@ def parse_args():
     parser.add_argument("--state-size", type=int, default=1024)
     parser.add_argument("--num-layers", type=int, default=4)
     parser.add_argument("--num-heads", type=int, default=8)
+    parser.add_argument("--drafter-mode", choices=("sequential", "parallel"), default="sequential")
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--teacher-forcing-start", type=float, default=1.0)
     parser.add_argument("--teacher-forcing-end", type=float, default=0.0)
@@ -109,7 +110,7 @@ def save_checkpoint(head: EagleFlowDrafter, directory: Path, config: dict) -> No
 
 def forward_head(
     model,
-    head: EagleFlowDrafter,
+    head,
     teacher: dict,
     ratio: float,
     feedback_mode: str,
@@ -134,7 +135,7 @@ def forward_head(
 
 
 @torch.no_grad()
-def evaluate(model, head: EagleFlowDrafter, dataloader, args) -> dict:
+def evaluate(model, head, dataloader, args) -> dict:
     head.eval()
     hidden_losses, embedding_losses, kl_losses, prefixes, first_tokens = [], [], [], [], []
     for index, raw in enumerate(dataloader):
@@ -189,7 +190,8 @@ def main() -> None:
     model.to(device="cuda", dtype=dtype).eval()
     for parameter in model.parameters():
         parameter.requires_grad_(False)
-    head = EagleFlowDrafter(
+    head_class = ParallelEagleFlowDrafter if args.drafter_mode == "parallel" else EagleFlowDrafter
+    head = head_class(
         int(model.config.hidden_size), int(model.config.block_size), args.state_size,
         args.num_layers, args.num_heads, args.dropout,
     ).to(device="cuda", dtype=dtype).train()
@@ -199,14 +201,15 @@ def main() -> None:
     train_loader = DataLoader(PackedTokenDataset(args.train_manifest), batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True, drop_last=True)
     eval_loader = DataLoader(PackedTokenDataset(args.eval_manifest), batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)
     checkpoint_config = {
-        "format": "eagleflow_endpoint_drafter_v1",
-        "method": "attention_conditioned_endpoint_flow_map",
+        "format": "eagleflow_endpoint_drafter_v2",
+        "method": f"{args.drafter_mode}_attention_conditioned_endpoint_flow_map",
         "objective": "prefix_survival_plus_eagle_feature_token_trajectory_plus_endpoint_flow_consistency",
         "base_flowdraft_checkpoint": str(Path(args.init_checkpoint).resolve()),
         "base_flowdraft_adapter_sha256": sha256_file(Path(args.init_checkpoint) / "adapter_model.safetensors"),
         "block_size": head.block_size, "hidden_size": head.hidden_size, "state_size": head.state_size,
-        "num_layers": head.num_layers, "num_heads": head.num_heads, "feedback_mode": args.feedback_mode,
-        "inference": "time-zero endpoint flow rollout with advanced-token feedback and one frozen AR verifier pass",
+        "num_layers": head.num_layers, "num_heads": head.num_heads, "drafter_mode": args.drafter_mode,
+        "feedback_mode": args.feedback_mode,
+        "inference": "time-zero endpoint flow rollout with one frozen AR verifier pass",
     }
     run_config = vars(args) | {
         "method": checkpoint_config["method"], "parent_adapter_metadata": parent_metadata,

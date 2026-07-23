@@ -16,7 +16,7 @@ from orthrus_training.modeling import FlowDraftStateAdapter
 from orthrus_training.residual_flow import ResidualFlowCorrector, verifier_margin
 from orthrus_training.cacheflow import CacheFlowTrajectoryHead, flow_source_from_context
 from orthrus_training.hydraflow import HydraFlowDrafter
-from orthrus_training.eagleflow import EagleFlowDrafter
+from orthrus_training.eagleflow import EagleFlowDrafter, ParallelEagleFlowDrafter
 from orthrus_training.flowtree import (
     ancestor_matrix,
     build_flowtree,
@@ -356,3 +356,14 @@ def test_eagleflow_attention_trajectory_uses_feature_and_token_feedback():
     assert free_embeddings.shape == forced_embeddings.shape == (2, 3, 4, 8)
     assert torch.isfinite(free_hidden).all()
     assert not torch.allclose(free_hidden[:, :, 1:], forced_hidden[:, :, 1:])
+
+
+def test_parallel_eagleflow_generates_all_block_endpoints_in_one_call():
+    head = ParallelEagleFlowDrafter(hidden_size=8, block_size=5, state_size=8, num_layers=2, num_heads=2)
+    context = torch.randn((2, 3, 8))
+    anchor = torch.randn((2, 3, 8))
+
+    hidden, embeddings = head.rollout(context, anchor)
+
+    assert hidden.shape == embeddings.shape == (2, 3, 4, 8)
+    assert torch.isfinite(hidden).all()

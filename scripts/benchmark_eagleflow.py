@@ -17,7 +17,7 @@ from transformers import DynamicCache
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from benchmark_flowdraft import encode_prompt, first_mismatch, generate_ar_greedy, load_prompts, percentile, sample_greedy, synchronize
-from orthrus_training.eagleflow import EagleFlowDrafter
+from orthrus_training.eagleflow import EagleFlowDrafter, ParallelEagleFlowDrafter
 from orthrus_training.modeling import dtype_from_string, load_flowdraft_adapter, load_tokenizer
 
 
@@ -47,9 +47,10 @@ def load_head(path: str | Path, device: torch.device, dtype: torch.dtype):
     path = Path(path)
     with (path / "eagleflow_config.json").open("r", encoding="utf-8") as handle:
         config = json.load(handle)
-    if config.get("format") != "eagleflow_endpoint_drafter_v1":
+    if config.get("format") not in {"eagleflow_endpoint_drafter_v1", "eagleflow_endpoint_drafter_v2"}:
         raise ValueError(f"Unsupported EagleFlow checkpoint: {config.get('format')}")
-    head = EagleFlowDrafter(
+    head_class = ParallelEagleFlowDrafter if config.get("drafter_mode") == "parallel" else EagleFlowDrafter
+    head = head_class(
         hidden_size=int(config["hidden_size"]), block_size=int(config["block_size"]),
         state_size=int(config["state_size"]), num_layers=int(config["num_layers"]),
         num_heads=int(config["num_heads"]),
