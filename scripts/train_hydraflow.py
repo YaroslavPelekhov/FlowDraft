@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from orthrus_training.data import PackedTokenDataset, assert_disjoint_packed_manifests, sample_anchor_positions
 from orthrus_training.hydraflow import HydraFlowDrafter
-from orthrus_training.losses import gather_logits, prefix_acceptance_metrics, prefix_survival_cross_entropy
+from orthrus_training.losses import forward_kl_distillation, gather_logits, prefix_acceptance_metrics, prefix_survival_cross_entropy
 from orthrus_training.modeling import dtype_from_string, load_flowdraft_adapter
 
 
@@ -44,6 +44,8 @@ def parse_args():
     parser.add_argument("--hidden-loss-weight", type=float, default=0.25)
     parser.add_argument("--embedding-loss-weight", type=float, default=0.25)
     parser.add_argument("--prefix-loss-weight", type=float, default=1.0)
+    parser.add_argument("--kl-loss-weight", type=float, default=0.0)
+    parser.add_argument("--kl-temperature", type=float, default=1.0)
     parser.add_argument("--prefix-weight-decay", type=float, default=0.9)
     parser.add_argument("--state-size", type=int, default=1024)
     parser.add_argument("--num-layers", type=int, default=2)
@@ -148,6 +150,7 @@ def collect_teacher(model, input_ids: torch.Tensor, num_blocks: int) -> dict:
         "target_hidden": target_hidden,
         "target_embeddings": model.model.embed_tokens(target_tokens).detach(),
         "target_tokens": target_tokens.reshape(input_ids.shape[0], -1),
+        "teacher_logits": teacher_logits.detach(),
     }
 
 
@@ -184,7 +187,7 @@ def forward_head(model, head, teacher: dict, ratio: float, feedback_mode: str, f
 @torch.no_grad()
 def evaluate(model, head, dataloader, args) -> dict:
     head.eval()
-    hidden_losses, embedding_losses, prefixes, first_tokens = [], [], [], []
+    hidden_losses, embedding_losses, kl_losses, prefixes, first_tokens = [], [], [], [], []
     for index, raw in enumerate(dataloader):
         if index >= args.eval_batches:
             break
@@ -194,6 +197,8 @@ def evaluate(model, head, dataloader, args) -> dict:
         embedding_rms = teacher["target_embeddings"].float().square().mean(dim=-1, keepdim=True).add(1e-6).sqrt()
         hidden_losses.append(float(((hidden.float() - teacher["target_hidden"].float()) / hidden_rms).square().mean().cpu()))
         embedding_losses.append(float(((embeddings.float() - teacher["target_embeddings"].float()) / embedding_rms).square().mean().cpu()))
+        if args.kl_loss_weight:
+            kl_losses.append(float(forward_kl_distillation(logits, teacher["teacher_logits"], args.kl_temperature, reduction="tokenmean").cpu()))
         metrics = prefix_acceptance_metrics(logits, teacher["target_tokens"], int(model.config.block_size))
         prefixes.append(float(metrics["greedy_prefix_acceptance"].cpu()))
         first_tokens.append(float(metrics["first_token_acc"].cpu()))
@@ -201,6 +206,7 @@ def evaluate(model, head, dataloader, args) -> dict:
     return {
         "eval_hidden_mse": sum(hidden_losses) / len(hidden_losses),
         "eval_embedding_mse": sum(embedding_losses) / len(embedding_losses),
+        "eval_kl": sum(kl_losses) / len(kl_losses) if kl_losses else None,
         "eval_greedy_prefix_acceptance": sum(prefixes) / len(prefixes),
         "eval_first_token_acc": sum(first_tokens) / len(first_tokens),
         "eval_batches": len(prefixes),
@@ -218,6 +224,8 @@ def main() -> None:
         raise ValueError("flow_time_min must be in [0, 1)")
     if not 0.0 < args.teacher_forcing_decay_ratio <= 1.0:
         raise ValueError("teacher_forcing_decay_ratio must be in (0, 1]")
+    if args.kl_loss_weight < 0.0 or args.kl_temperature <= 0.0:
+        raise ValueError("kl_loss_weight must be non-negative and kl_temperature positive")
     set_seed(args.seed)
     output_dir = Path(args.output_dir)
     allowed_existing_files = {"run.log", "supervisor.log", "supervisor.err.log"}
@@ -264,6 +272,9 @@ def main() -> None:
             hidden_loss = ((hidden.float() - teacher["target_hidden"].float()) / hidden_rms).square().mean()
             embedding_loss = ((embeddings.float() - teacher["target_embeddings"].float()) / embedding_rms).square().mean()
             prefix_loss = prefix_survival_cross_entropy(logits, teacher["target_tokens"], int(model.config.block_size), args.prefix_weight_decay)
+            kl_loss = forward_kl_distillation(
+                logits, teacher["teacher_logits"], args.kl_temperature, reduction="tokenmean"
+            ) if args.kl_loss_weight else torch.zeros((), device=hidden.device)
             diagonal_loss = torch.zeros((), device=hidden.device)
             consistency_loss = torch.zeros((), device=hidden.device)
             if args.flow_diagonal_fraction and torch.rand((), device=hidden.device) < args.flow_diagonal_fraction:
@@ -285,6 +296,7 @@ def main() -> None:
                 args.hidden_loss_weight * hidden_loss
                 + args.embedding_loss_weight * embedding_loss
                 + args.prefix_loss_weight * prefix_loss
+                + args.kl_loss_weight * kl_loss
                 + args.flow_diagonal_loss_weight * diagonal_loss
                 + args.flow_consistency_weight * consistency_loss
             )
@@ -292,7 +304,7 @@ def main() -> None:
             torch.nn.utils.clip_grad_norm_(head.parameters(), args.max_grad_norm)
             optimizer.step(); scheduler.step(); optimizer.zero_grad(set_to_none=True); progress.update(1)
             metrics = prefix_acceptance_metrics(logits.detach(), teacher["target_tokens"], int(model.config.block_size))
-            record = {"step": step, "loss": float(loss.detach().cpu()), "hidden_mse": float(hidden_loss.detach().cpu()), "embedding_mse": float(embedding_loss.detach().cpu()), "prefix_loss": float(prefix_loss.detach().cpu()), "flow_diagonal_mse": float(diagonal_loss.detach().cpu()), "flow_consistency_mse": float(consistency_loss.detach().cpu()), "greedy_prefix": float(metrics["greedy_prefix_acceptance"].cpu()), "first_token_acc": float(metrics["first_token_acc"].cpu()), "teacher_forcing_ratio": ratio, "lr": scheduler.get_last_lr()[0], "peak_gb": torch.cuda.max_memory_allocated() / 2**30}
+            record = {"step": step, "loss": float(loss.detach().cpu()), "hidden_mse": float(hidden_loss.detach().cpu()), "embedding_mse": float(embedding_loss.detach().cpu()), "prefix_loss": float(prefix_loss.detach().cpu()), "kl": float(kl_loss.detach().cpu()), "flow_diagonal_mse": float(diagonal_loss.detach().cpu()), "flow_consistency_mse": float(consistency_loss.detach().cpu()), "greedy_prefix": float(metrics["greedy_prefix_acceptance"].cpu()), "first_token_acc": float(metrics["first_token_acc"].cpu()), "teacher_forcing_ratio": ratio, "lr": scheduler.get_last_lr()[0], "peak_gb": torch.cuda.max_memory_allocated() / 2**30}
             metrics_file.write(json.dumps(record) + "\n"); metrics_file.flush()
             if step % args.log_every == 0:
                 print("TRAIN " + json.dumps(record), flush=True)
