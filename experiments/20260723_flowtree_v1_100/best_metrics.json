@@ -8,5 +8,5 @@
   "best_metric_value": 1.52734375,
   "best_step": 50,
   "checkpoint_written": true,
-  "method": "flowdraft_teacher_forced_categorical_flow_map_v4"
+  "method": "flowtree_batched_coverage_categorical_flow_map_v1"
 }

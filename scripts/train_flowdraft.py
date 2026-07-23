@@ -788,15 +788,23 @@ def main() -> None:
     warmup_steps = int(total_steps * args.warmup_ratio)
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
 
-    metadata = vars(args) | {
-        "method": "flowdraft_teacher_forced_categorical_flow_map_v4" if args.flow_state_adapter else (
+    method = "flowtree_batched_coverage_categorical_flow_map_v1" if args.tree_coverage_weight > 0 else (
+        "flowdraft_teacher_forced_categorical_flow_map_v4" if args.flow_state_adapter else (
             "flowdraft_categorical_flow_map" if args.flow_objective == "ecld" else "flowdraft_legacy"
-        ),
-        "objective": (
+        )
+    )
+    objective = (
+        "teacher_forced_categorical_flow_plus_batched_tree_topk_coverage"
+        if args.tree_coverage_weight > 0
+        else (
             "teacher_forced_diagonal_vfm_plus_soft_prefix_kl_plus_off_diagonal_ecld"
             if args.flow_objective == "ecld"
             else "endpoint_teacher_distillation_plus_prefix_survival"
-        ),
+        )
+    )
+    metadata = vars(args) | {
+        "method": method,
+        "objective": objective,
         "simplex_projection": "complete_vocabulary_expectation"
         if args.endpoint_transport == "dense"
         else f"renormalized_topk_{args.endpoint_topk}",
@@ -1295,7 +1303,7 @@ def main() -> None:
                     "best_metric": args.best_metric,
                     "best_metric_value": best_metric_value if best_step is not None else None,
                     "best_eval_loss": best_eval_loss if best_step is not None else None,
-                    "method": "flowdraft_categorical_flow_map",
+                    "method": metadata["method"],
                     "stopped_early": stopped_early,
                     "early_stopping_patience": args.early_stopping_patience,
                     "evaluations_without_improvement": evaluations_without_improvement,

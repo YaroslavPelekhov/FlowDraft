@@ -6,6 +6,6 @@
   "early_stopping_patience": 3,
   "evaluations_without_improvement": 2,
   "last_step": 100,
-  "method": "flowdraft_categorical_flow_map",
+  "method": "flowtree_batched_coverage_categorical_flow_map_v1",
   "stopped_early": false
 }
