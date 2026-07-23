@@ -47,7 +47,7 @@ def load_head(path: str | Path, device: torch.device, dtype: torch.dtype):
     path = Path(path)
     with (path / "hydraflow_config.json").open("r", encoding="utf-8") as handle:
         config = json.load(handle)
-    if config.get("format") != "hydraflow_latent_drafter_v1":
+    if config.get("format") not in {"hydraflow_latent_drafter_v1", "hydraflow_latent_drafter_v2"}:
         raise ValueError(f"Unsupported HydraFlow checkpoint: {config.get('format')}")
     head = HydraFlowDrafter(
         hidden_size=int(config["hidden_size"]), block_size=int(config["block_size"]),
@@ -58,7 +58,7 @@ def load_head(path: str | Path, device: torch.device, dtype: torch.dtype):
 
 
 @torch.inference_mode()
-def generate_hydraflow_greedy(model, head, input_ids, max_new_tokens: int, eos_token_id: int | None):
+def generate_hydraflow_greedy(model, head, input_ids, max_new_tokens: int, eos_token_id: int | None, feedback_mode: str = "continuous"):
     device = input_ids.device
     block_size, mask_id = int(model.config.block_size), int(model.config.mask_token_id)
     past = DynamicCache(config=model.config)
@@ -82,9 +82,14 @@ def generate_hydraflow_greedy(model, head, input_ids, max_new_tokens: int, eos_t
 
     while generated < max_new_tokens and start_idx < max_length - 1:
         diff_len = min(block_size, max_length - start_idx)
+        def advanced_token_feedback(value: torch.Tensor) -> torch.Tensor:
+            token_ids = model.lm_head(value.reshape(-1, value.shape[-1])).argmax(dim=-1)
+            return model.model.embed_tokens(token_ids).reshape_as(value)
+
         hidden, _ = head.rollout(
             context_hidden.reshape(1, 1, -1),
             model.model.embed_tokens(output_ids[:, start_idx:start_idx + 1]).reshape(1, 1, -1),
+            feedback_embedding_fn=advanced_token_feedback if feedback_mode == "advanced_token" else None,
         )
         proposal = sample_greedy(model.lm_head(hidden.reshape(-1, hidden.shape[-1]))).reshape(1, -1)[:, :diff_len - 1]
         head_calls += 1
@@ -131,12 +136,12 @@ def main() -> None:
     model = model.to(device=device, dtype=dtype).eval()
     tokenizer, prompts = load_tokenizer(metadata["base_model"]), load_prompts(args.prompts_jsonl)
     for row in prompts[:args.warmup_prompts]:
-        generate_hydraflow_greedy(model, head, encode_prompt(tokenizer, row["prompt"], device), min(16, args.max_new_tokens), tokenizer.eos_token_id)
+        generate_hydraflow_greedy(model, head, encode_prompt(tokenizer, row["prompt"], device), min(16, args.max_new_tokens), tokenizer.eos_token_id, config.get("feedback_mode", "continuous"))
     rows = []
     for row in prompts:
         input_ids = encode_prompt(tokenizer, row["prompt"], device)
         ar_ids, ar_seconds, ar_forwards = generate_ar_greedy(model, input_ids, args.max_new_tokens, tokenizer.eos_token_id)
-        draft_ids, draft_seconds, target_forwards, head_calls, acceptance = generate_hydraflow_greedy(model, head, input_ids, args.max_new_tokens, tokenizer.eos_token_id)
+        draft_ids, draft_seconds, target_forwards, head_calls, acceptance = generate_hydraflow_greedy(model, head, input_ids, args.max_new_tokens, tokenizer.eos_token_id, config.get("feedback_mode", "continuous"))
         ar_new, draft_new = int(ar_ids.shape[1] - input_ids.shape[1]), int(draft_ids.shape[1] - input_ids.shape[1])
         record = {"id": row["id"], "parity_ok": bool(torch.equal(ar_ids, draft_ids)), "first_mismatch_at": first_mismatch(ar_ids, draft_ids), "ar_tokens": ar_new, "hydraflow_tokens": draft_new, "ar_seconds": ar_seconds, "hydraflow_seconds": draft_seconds, "speedup": ((draft_new / draft_seconds) / (ar_new / ar_seconds)) if ar_seconds and draft_seconds and ar_new else 0.0, "ar_forward_passes": ar_forwards, "target_model_forward_passes": target_forwards, "hydraflow_head_calls": head_calls, "target_model_tpf": draft_new / target_forwards if target_forwards else 0.0, "acceptance": acceptance, "acceptance_mean": statistics.mean(acceptance) if acceptance else 0.0}
         rows.append(record); print(json.dumps(record), flush=True)

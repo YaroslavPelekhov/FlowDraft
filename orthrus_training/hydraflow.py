@@ -9,6 +9,8 @@ has been generated.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import torch
 import torch.nn as nn
 
@@ -57,6 +59,12 @@ class HydraFlowDrafter(nn.Module):
         self.transition = nn.GRUCell(state_size, state_size)
         self.blocks = nn.ModuleList(LatentFlowBlock(state_size, dropout) for _ in range(num_layers))
         self.output_norm = nn.LayerNorm(state_size)
+        self.source_endpoint = nn.Linear(state_size, hidden_size)
+        self.flow_input_norm = nn.LayerNorm(hidden_size)
+        self.flow_input_proj = nn.Linear(hidden_size, state_size)
+        self.flow_time = nn.Sequential(nn.Linear(1, state_size), nn.SiLU(), nn.Linear(state_size, state_size))
+        self.flow_block = LatentFlowBlock(state_size, dropout)
+        self.flow_norm = nn.LayerNorm(state_size)
         self.hidden_endpoint = nn.Linear(state_size, hidden_size)
         self.embedding_endpoint = nn.Linear(state_size, hidden_size)
 
@@ -66,12 +74,22 @@ class HydraFlowDrafter(nn.Module):
         anchor_embeddings: torch.Tensor,
         teacher_embeddings: torch.Tensor | None = None,
         teacher_forcing_ratio: float = 0.0,
+        feedback_embedding_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        flow_targets: torch.Tensor | None = None,
+        flow_time: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Produce a correlated future trajectory without a target-model pass.
 
         ``teacher_embeddings`` has shape ``[B, blocks, K-1, H]`` during
-        training.  At deployment it is absent and the predicted continuous
-        endpoint embedding feeds the next latent transition.
+        training.  At deployment it is absent and the predicted endpoint feeds
+        the next latent transition.  A discrete ``feedback_embedding_fn`` can
+        turn each endpoint into an advanced-token embedding from the frozen
+        vocabulary; this matches inference more closely than feeding an
+        unconstrained continuous vector back into the recurrence.
+
+        With ``flow_targets`` and ``flow_time`` the endpoint map is trained on
+        the categorical-flow interpolant ``(1-t) source + t target``.  The
+        deployed path always uses the source at ``t=0``.
         """
 
         if context_hidden.shape != anchor_embeddings.shape:
@@ -81,10 +99,16 @@ class HydraFlowDrafter(nn.Module):
         expected = context_hidden.shape[:2] + (self.prediction_length, self.hidden_size)
         if teacher_embeddings is not None and teacher_embeddings.shape != expected:
             raise ValueError(f"Expected teacher embeddings {expected}, got {tuple(teacher_embeddings.shape)}")
+        if flow_targets is not None and flow_targets.shape != expected:
+            raise ValueError(f"Expected flow targets {expected}, got {tuple(flow_targets.shape)}")
         if not 0.0 <= teacher_forcing_ratio <= 1.0:
             raise ValueError("teacher_forcing_ratio must be in [0, 1]")
 
         batch_size, blocks, _ = context_hidden.shape
+        if flow_time is None:
+            flow_time = torch.zeros((batch_size, blocks, 1), device=context_hidden.device, dtype=context_hidden.dtype)
+        if flow_time.shape != (batch_size, blocks, 1):
+            raise ValueError("flow_time must have shape [B, blocks, 1]")
         state = torch.tanh(
             self.context_proj(self.context_norm(context_hidden))
             + self.anchor_proj(self.anchor_norm(anchor_embeddings))
@@ -97,15 +121,23 @@ class HydraFlowDrafter(nn.Module):
             for block in self.blocks:
                 state = block(state)
             normalized = self.output_norm(state)
-            hidden = self.hidden_endpoint(normalized).reshape(batch_size, blocks, self.hidden_size)
+            source = self.source_endpoint(normalized).reshape(batch_size, blocks, self.hidden_size)
+            interpolant = source if flow_targets is None else (
+                (1.0 - flow_time) * source + flow_time * flow_targets[:, :, position, :]
+            )
+            flow_state = normalized + self.flow_input_proj(self.flow_input_norm(interpolant)).reshape(batch_size * blocks, self.state_size)
+            flow_state = flow_state + self.flow_time(flow_time.reshape(batch_size * blocks, 1))
+            flow_state = self.flow_block(flow_state)
+            hidden = source + self.hidden_endpoint(self.flow_norm(flow_state)).reshape(batch_size, blocks, self.hidden_size)
             embedding = self.embedding_endpoint(normalized).reshape(batch_size, blocks, self.hidden_size)
             hidden_outputs.append(hidden)
             embedding_outputs.append(embedding)
-            if teacher_embeddings is None:
-                current = embedding
+            predicted = feedback_embedding_fn(hidden.detach()) if feedback_embedding_fn is not None else embedding.detach()
+            if teacher_embeddings is None or teacher_forcing_ratio <= 0.0:
+                current = predicted
+            elif teacher_forcing_ratio >= 1.0:
+                current = teacher_embeddings[:, :, position, :]
             else:
-                current = (
-                    teacher_forcing_ratio * teacher_embeddings[:, :, position, :]
-                    + (1.0 - teacher_forcing_ratio) * embedding
-                )
+                use_teacher = torch.rand((batch_size, blocks, 1), device=current.device) < teacher_forcing_ratio
+                current = torch.where(use_teacher, teacher_embeddings[:, :, position, :], predicted)
         return torch.stack(hidden_outputs, dim=2), torch.stack(embedding_outputs, dim=2)

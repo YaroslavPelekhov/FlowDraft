@@ -50,6 +50,11 @@ def parse_args():
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--teacher-forcing-start", type=float, default=1.0)
     parser.add_argument("--teacher-forcing-end", type=float, default=0.1)
+    parser.add_argument("--feedback-mode", choices=("continuous", "advanced_token"), default="continuous")
+    parser.add_argument("--flow-diagonal-fraction", type=float, default=0.0)
+    parser.add_argument("--flow-consistency-weight", type=float, default=0.0)
+    parser.add_argument("--flow-diagonal-loss-weight", type=float, default=0.0)
+    parser.add_argument("--flow-time-min", type=float, default=0.05)
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("--attn-implementation", default="eager")
     parser.add_argument("--eval-every", type=int, default=50)
@@ -150,9 +155,25 @@ def teacher_forcing_ratio(args, step: int) -> float:
     return args.teacher_forcing_start + progress * (args.teacher_forcing_end - args.teacher_forcing_start)
 
 
-def forward_head(model, head, teacher: dict, ratio: float):
+@torch.no_grad()
+def advanced_token_embeddings(model, hidden: torch.Tensor) -> torch.Tensor:
+    """Project a feature endpoint to a frozen-vocabulary advanced token."""
+
+    flat = hidden.reshape(-1, hidden.shape[-1])
+    token_ids = model.lm_head(flat).argmax(dim=-1)
+    return model.model.embed_tokens(token_ids).reshape_as(hidden)
+
+
+def forward_head(model, head, teacher: dict, ratio: float, feedback_mode: str, flow_targets=None, flow_time=None):
+    feedback = advanced_token_embeddings if feedback_mode == "advanced_token" else None
     hidden, embeddings = head.rollout(
-        teacher["context_hidden"], teacher["anchor_embeddings"], teacher["target_embeddings"], ratio
+        teacher["context_hidden"],
+        teacher["anchor_embeddings"],
+        teacher["target_embeddings"],
+        ratio,
+        feedback_embedding_fn=(lambda value: feedback(model, value)) if feedback is not None else None,
+        flow_targets=flow_targets,
+        flow_time=flow_time,
     )
     logits = model.lm_head(hidden.reshape(-1, hidden.shape[-1])).reshape(hidden.shape[0], -1, int(model.config.vocab_size))
     return hidden, embeddings, logits
@@ -166,7 +187,7 @@ def evaluate(model, head, dataloader, args) -> dict:
         if index >= args.eval_batches:
             break
         teacher = collect_teacher(model, raw.to(device="cuda", non_blocking=True), args.eval_anchor_blocks)
-        hidden, embeddings, logits = forward_head(model, head, teacher, ratio=0.0)
+        hidden, embeddings, logits = forward_head(model, head, teacher, ratio=0.0, feedback_mode=args.feedback_mode)
         hidden_rms = teacher["target_hidden"].float().square().mean(dim=-1, keepdim=True).add(1e-6).sqrt()
         embedding_rms = teacher["target_embeddings"].float().square().mean(dim=-1, keepdim=True).add(1e-6).sqrt()
         hidden_losses.append(float(((hidden.float() - teacher["target_hidden"].float()) / hidden_rms).square().mean().cpu()))
@@ -189,6 +210,10 @@ def main() -> None:
     args = merge_config(parsed, load_config(parsed.config), cli)
     if not torch.cuda.is_available():
         raise RuntimeError("HydraFlow training requires CUDA")
+    if not 0.0 <= args.flow_diagonal_fraction <= 1.0:
+        raise ValueError("flow_diagonal_fraction must be in [0, 1]")
+    if not 0.0 <= args.flow_time_min < 1.0:
+        raise ValueError("flow_time_min must be in [0, 1)")
     set_seed(args.seed)
     output_dir = Path(args.output_dir)
     if output_dir.exists() and {item.name for item in output_dir.iterdir()} - {"run.log"}:
@@ -207,13 +232,14 @@ def main() -> None:
     train_loader = DataLoader(PackedTokenDataset(args.train_manifest), batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True, drop_last=True)
     eval_loader = DataLoader(PackedTokenDataset(args.eval_manifest), batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)
     checkpoint_config = {
-        "format": "hydraflow_latent_drafter_v1", "method": "self_conditioned_latent_feature_flow",
-        "objective": "prefix_survival_plus_hidden_and_embedding_endpoint_regression",
+        "format": "hydraflow_latent_drafter_v2", "method": "advanced_token_conditional_feature_flow_map",
+        "objective": "prefix_survival_plus_feature_endpoint_regression_plus_endpoint_consistency",
         "base_flowdraft_checkpoint": str(Path(args.init_checkpoint).resolve()),
         "base_flowdraft_adapter_sha256": sha256_file(Path(args.init_checkpoint) / "adapter_model.safetensors"),
         "block_size": head.block_size, "hidden_size": head.hidden_size, "state_size": head.state_size,
         "num_layers": head.num_layers,
-        "inference": "continuous latent rollout, one batched lm_head, one ordinary frozen AR verifier pass",
+        "feedback_mode": args.feedback_mode,
+        "inference": "time-zero endpoint rollout, advanced-token feedback, one ordinary frozen AR verifier pass",
     }
     run_config = vars(args) | {"method": checkpoint_config["method"], "parent_adapter_metadata": parent_metadata, "train_unique_sequences": train_unique, "eval_unique_sequences": eval_unique, "started_at_utc": datetime.now(timezone.utc).isoformat()}
     write_json(output_dir / "run_config.json", run_config)
@@ -227,18 +253,41 @@ def main() -> None:
             step += 1
             ratio = teacher_forcing_ratio(args, step)
             teacher = collect_teacher(model, raw.to(device="cuda", non_blocking=True), args.num_anchor_blocks)
-            hidden, embeddings, logits = forward_head(model, head, teacher, ratio)
+            hidden, embeddings, logits = forward_head(model, head, teacher, ratio, args.feedback_mode)
             hidden_rms = teacher["target_hidden"].float().square().mean(dim=-1, keepdim=True).add(1e-6).sqrt()
             embedding_rms = teacher["target_embeddings"].float().square().mean(dim=-1, keepdim=True).add(1e-6).sqrt()
             hidden_loss = ((hidden.float() - teacher["target_hidden"].float()) / hidden_rms).square().mean()
             embedding_loss = ((embeddings.float() - teacher["target_embeddings"].float()) / embedding_rms).square().mean()
             prefix_loss = prefix_survival_cross_entropy(logits, teacher["target_tokens"], int(model.config.block_size), args.prefix_weight_decay)
-            loss = args.hidden_loss_weight * hidden_loss + args.embedding_loss_weight * embedding_loss + args.prefix_loss_weight * prefix_loss
+            diagonal_loss = torch.zeros((), device=hidden.device)
+            consistency_loss = torch.zeros((), device=hidden.device)
+            if args.flow_diagonal_fraction and torch.rand((), device=hidden.device) < args.flow_diagonal_fraction:
+                flow_time = torch.empty(
+                    (*teacher["context_hidden"].shape[:2], 1), device=hidden.device, dtype=hidden.dtype
+                ).uniform_(args.flow_time_min, 1.0)
+                diagonal_hidden, _, _ = forward_head(
+                    model,
+                    head,
+                    teacher,
+                    ratio=1.0,
+                    feedback_mode=args.feedback_mode,
+                    flow_targets=teacher["target_hidden"],
+                    flow_time=flow_time,
+                )
+                diagonal_loss = ((diagonal_hidden.float() - teacher["target_hidden"].float()) / hidden_rms).square().mean()
+                consistency_loss = ((diagonal_hidden.float() - hidden.detach().float()) / hidden_rms).square().mean()
+            loss = (
+                args.hidden_loss_weight * hidden_loss
+                + args.embedding_loss_weight * embedding_loss
+                + args.prefix_loss_weight * prefix_loss
+                + args.flow_diagonal_loss_weight * diagonal_loss
+                + args.flow_consistency_weight * consistency_loss
+            )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(head.parameters(), args.max_grad_norm)
             optimizer.step(); scheduler.step(); optimizer.zero_grad(set_to_none=True); progress.update(1)
             metrics = prefix_acceptance_metrics(logits.detach(), teacher["target_tokens"], int(model.config.block_size))
-            record = {"step": step, "loss": float(loss.detach().cpu()), "hidden_mse": float(hidden_loss.detach().cpu()), "embedding_mse": float(embedding_loss.detach().cpu()), "prefix_loss": float(prefix_loss.detach().cpu()), "greedy_prefix": float(metrics["greedy_prefix_acceptance"].cpu()), "first_token_acc": float(metrics["first_token_acc"].cpu()), "teacher_forcing_ratio": ratio, "lr": scheduler.get_last_lr()[0], "peak_gb": torch.cuda.max_memory_allocated() / 2**30}
+            record = {"step": step, "loss": float(loss.detach().cpu()), "hidden_mse": float(hidden_loss.detach().cpu()), "embedding_mse": float(embedding_loss.detach().cpu()), "prefix_loss": float(prefix_loss.detach().cpu()), "flow_diagonal_mse": float(diagonal_loss.detach().cpu()), "flow_consistency_mse": float(consistency_loss.detach().cpu()), "greedy_prefix": float(metrics["greedy_prefix_acceptance"].cpu()), "first_token_acc": float(metrics["first_token_acc"].cpu()), "teacher_forcing_ratio": ratio, "lr": scheduler.get_last_lr()[0], "peak_gb": torch.cuda.max_memory_allocated() / 2**30}
             metrics_file.write(json.dumps(record) + "\n"); metrics_file.flush()
             if step % args.log_every == 0:
                 print("TRAIN " + json.dumps(record), flush=True)

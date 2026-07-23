@@ -1,0 +1,12 @@
+{
+  "best_eval_first_token_acc": 0.9375,
+  "best_eval_greedy_prefix_acceptance": 2.19384765625,
+  "best_eval_loss": 4.129266567528248,
+  "best_eval_prefix_expected_acceptance": 1.604059986770153,
+  "best_eval_top1": 0.17653729300945997,
+  "best_metric": "eval_greedy_prefix_acceptance",
+  "best_metric_value": 2.19384765625,
+  "best_step": 1800,
+  "checkpoint_written": true,
+  "method": "flowdraft_teacher_forced_categorical_flow_map_v4"
+}
