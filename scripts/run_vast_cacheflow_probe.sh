@@ -22,6 +22,8 @@ EVAL_MANIFEST="${EVAL_MANIFEST:-/workspace/flowdraft_data/nemotron_50k_holdout/m
 INIT_CHECKPOINT="${INIT_CHECKPOINT:-/workspace/flowdraft_runs/flowdraft_v4_full_300/best}"
 OUT_DIR="${OUT_DIR:-/workspace/flowdraft_runs/cacheflow_probe_100_r1}"
 MAX_STEPS="${MAX_STEPS:-100}"
+HF_REPO_ID="${HF_REPO_ID:-}"
+HF_RUN_PATH="${HF_RUN_PATH:-}"
 
 if [ -e "$OUT_DIR" ]; then
   existing_entries="$(find "$OUT_DIR" -mindepth 1 -maxdepth 1 -printf '%f\n' | grep -vx 'run.log' || true)"
@@ -62,4 +64,13 @@ log "Strict FP32 greedy losslessness gate; TPF counts only frozen Qwen forwards"
   --dtype fp32 \
   --attn-implementation eager \
   --require-parity
+
+if [ -n "$HF_REPO_ID" ]; then
+  log "Uploading CacheFlow best/last checkpoints to Hugging Face"
+  HF_UPLOAD_ARGS=(--run-dir "$OUT_DIR" --repo-id "$HF_REPO_ID")
+  if [ -n "$HF_RUN_PATH" ]; then
+    HF_UPLOAD_ARGS+=(--run-path "$HF_RUN_PATH")
+  fi
+  "$PYTHON_BIN" scripts/upload_checkpoints_hf.py "${HF_UPLOAD_ARGS[@]}"
+fi
 log "CacheFlow probe complete: $OUT_DIR"

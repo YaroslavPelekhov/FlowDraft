@@ -1,0 +1,13 @@
+{
+  "base_flowdraft_adapter_sha256": "68c7dbab9bdd21babf9f0617907d421b70534350819a84fd2c162a35c047dc4a",
+  "base_flowdraft_checkpoint": "/workspace/flowdraft_runs/flowdraft_v4_full_300/best",
+  "block_size": 32,
+  "format": "cacheflow_trajectory_head_v1",
+  "hidden_size": 2048,
+  "inference": "small CacheFlow head followed by one ordinary frozen AR verifier pass",
+  "last_step": 100,
+  "latent_size": 256,
+  "method": "one_pass_low_rank_hidden_trajectory_flow",
+  "num_heads": 8,
+  "num_layers": 2
+}
