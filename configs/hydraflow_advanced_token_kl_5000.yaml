@@ -1,0 +1,35 @@
+# Soft verifier-distribution distillation variant of the advanced-token
+# endpoint flow map. The deployed t=0 one-verifier path is unchanged.
+max_steps: 5000
+batch_size: 1
+num_anchor_blocks: 64
+learning_rate: 2.0e-4
+warmup_ratio: 0.05
+weight_decay: 0.01
+max_grad_norm: 1.0
+hidden_loss_weight: 0.25
+embedding_loss_weight: 0.05
+prefix_loss_weight: 1.0
+prefix_weight_decay: 0.9
+kl_loss_weight: 0.25
+kl_temperature: 1.0
+state_size: 1536
+num_layers: 4
+dropout: 0.0
+teacher_forcing_start: 1.0
+teacher_forcing_end: 0.0
+teacher_forcing_decay_ratio: 0.24
+feedback_mode: advanced_token
+flow_diagonal_fraction: 0.25
+flow_diagonal_loss_weight: 0.10
+flow_consistency_weight: 0.05
+flow_time_min: 0.05
+dtype: bf16
+attn_implementation: eager
+eval_every: 200
+eval_batches: 16
+eval_anchor_blocks: 64
+early_stopping_patience: 12
+seed: 272
+num_workers: 2
+log_every: 20

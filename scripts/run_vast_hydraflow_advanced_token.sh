@@ -22,6 +22,7 @@ EVAL_MANIFEST="${EVAL_MANIFEST:-/workspace/flowdraft_data/nemotron_50k_holdout/m
 INIT_CHECKPOINT="${INIT_CHECKPOINT:-/workspace/flowdraft_runs/flowdraft_v5_prefix_ecld_2000_r3/best}"
 OUT_DIR="${OUT_DIR:-/workspace/flowdraft_runs/hydraflow_advanced_token_5000_r2}"
 MAX_STEPS="${MAX_STEPS:-5000}"
+CONFIG_PATH="${CONFIG_PATH:-configs/hydraflow_advanced_token_5000.yaml}"
 HF_REPO_ID="${HF_REPO_ID:-}"
 HF_RUN_PATH="${HF_RUN_PATH:-}"
 
@@ -43,7 +44,7 @@ log "Advanced-token feature flow resource preflight"
 "$PYTHON_BIN" scripts/inspect_resources.py --paths / /workspace /dev/shm
 log "Training one-verifier advanced-token endpoint flow map"
 "$PYTHON_BIN" scripts/train_hydraflow.py \
-  --config configs/hydraflow_advanced_token_5000.yaml \
+  --config "$CONFIG_PATH" \
   --init-checkpoint "$INIT_CHECKPOINT" \
   --train-manifest "$TRAIN_MANIFEST" \
   --eval-manifest "$EVAL_MANIFEST" \
