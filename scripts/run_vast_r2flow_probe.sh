@@ -20,7 +20,7 @@ mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$HF_MODULES_CACHE" "$XDG_CACHE_HOME" "
 TRAIN_MANIFEST="${TRAIN_MANIFEST:-/workspace/flowdraft_data/nemotron_50k/manifest.json}"
 EVAL_MANIFEST="${EVAL_MANIFEST:-/workspace/flowdraft_data/nemotron_50k_holdout/manifest.json}"
 INIT_CHECKPOINT="${INIT_CHECKPOINT:-/workspace/flowdraft_runs/flowdraft_v4_full_300/best}"
-OUT_DIR="${OUT_DIR:-/workspace/flowdraft_runs/r2flow_probe_100}"
+OUT_DIR="${OUT_DIR:-/workspace/flowdraft_runs/r2flow_probe_100_r1}"
 MAX_STEPS="${MAX_STEPS:-100}"
 
 if [ -e "$OUT_DIR" ]; then
