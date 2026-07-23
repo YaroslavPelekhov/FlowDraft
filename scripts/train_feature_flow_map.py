@@ -58,6 +58,7 @@ def parse_args():
     parser.add_argument("--early-stopping-patience", type=int, default=8)
     parser.add_argument("--seed", type=int, default=131)
     parser.add_argument("--source-seed", type=int, default=901)
+    parser.add_argument("--source-mode", choices=("gaussian", "context"), default="gaussian")
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--log-every", type=int, default=20)
     args = parser.parse_args()
@@ -156,8 +157,8 @@ def normalised_feature_mse(prediction: torch.Tensor, target: torch.Tensor) -> to
     return ((prediction.float() - target.float()) / rms).square().mean()
 
 
-def root_prediction(head, model, teacher: dict[str, torch.Tensor], source_generator: torch.Generator):
-    source = feature_flow_source(teacher["context_hidden"], head.prediction_length, source_generator)
+def root_prediction(head, model, teacher: dict[str, torch.Tensor], source_generator: torch.Generator, source_mode: str):
+    source = feature_flow_source(teacher["context_hidden"], head.prediction_length, source_generator, mode=source_mode)
     time = torch.zeros(teacher["context_hidden"].shape[:2], device=source.device, dtype=source.dtype)
     endpoint = head(teacher["context_hidden"], model.model.embed_tokens(teacher["anchor_tokens"]).detach(), source, time)
     logits = model.lm_head(endpoint.reshape(-1, endpoint.shape[-1])).reshape(endpoint.shape[0], -1, int(model.config.vocab_size))
@@ -165,7 +166,7 @@ def root_prediction(head, model, teacher: dict[str, torch.Tensor], source_genera
 
 
 def training_losses(head, model, teacher, args, source_generator) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
-    source, root_endpoint, logits = root_prediction(head, model, teacher, source_generator)
+    source, root_endpoint, logits = root_prediction(head, model, teacher, source_generator, args.source_mode)
     target = teacher["target_hidden"]
     root_hidden = normalised_feature_mse(root_endpoint, target)
     teacher_kl = forward_kl_distillation(logits, teacher["teacher_logits"], reduction="tokenmean")
@@ -207,7 +208,7 @@ def evaluate(model, head, dataloader, args, source_generator) -> dict:
         if index >= args.eval_batches:
             break
         teacher = collect_teacher(model, raw.to(device="cuda", non_blocking=True), args.eval_anchor_blocks)
-        _, endpoint, logits = root_prediction(head, model, teacher, source_generator)
+        _, endpoint, logits = root_prediction(head, model, teacher, source_generator, args.source_mode)
         feature_losses.append(float(normalised_feature_mse(endpoint, teacher["target_hidden"]).cpu()))
         kls.append(float(forward_kl_distillation(logits, teacher["teacher_logits"], reduction="tokenmean").cpu()))
         metrics = prefix_acceptance_metrics(logits, teacher["teacher_logits"].argmax(dim=-1), head.block_size)
@@ -254,6 +255,7 @@ def main() -> None:
         "base_flowdraft_adapter_sha256": sha256_file(Path(args.init_checkpoint) / "adapter_model.safetensors"),
         "block_size": head.block_size, "hidden_size": head.hidden_size, "latent_size": head.latent_size,
         "num_layers": head.num_layers, "num_heads": head.num_heads,
+        "source_mode": args.source_mode,
         "inference": "block-parallel feature flow map followed by exactly one ordinary frozen AR verifier pass",
     }
     run_config = vars(args) | {"method": checkpoint_config["method"], "parent_adapter_metadata": parent_metadata, "train_unique_sequences": train_unique, "eval_unique_sequences": eval_unique, "started_at_utc": datetime.now(timezone.utc).isoformat()}

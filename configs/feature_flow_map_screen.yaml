@@ -25,5 +25,6 @@ eval_anchor_blocks: 64
 early_stopping_patience: 8
 seed: 131
 source_seed: 901
+source_mode: context
 num_workers: 2
 log_every: 20

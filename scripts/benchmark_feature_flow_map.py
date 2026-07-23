@@ -58,7 +58,7 @@ def load_head(path: str | Path, device: torch.device, dtype: torch.dtype):
 
 
 @torch.inference_mode()
-def generate_feature_flow_greedy(model, head, input_ids, max_new_tokens: int, eos_token_id: int | None):
+def generate_feature_flow_greedy(model, head, input_ids, max_new_tokens: int, eos_token_id: int | None, config: dict):
     device = input_ids.device
     block_size, mask_id = int(model.config.block_size), int(model.config.mask_token_id)
     past = DynamicCache(config=model.config)
@@ -82,7 +82,7 @@ def generate_feature_flow_greedy(model, head, input_ids, max_new_tokens: int, eo
     while generated < max_new_tokens and start_idx < max_length - 1:
         diff_len = min(block_size, max_length - start_idx)
         context = context_hidden.reshape(1, 1, -1)
-        source = feature_flow_source(context, head.prediction_length, source_generator)
+        source = feature_flow_source(context, head.prediction_length, source_generator, mode=config["source_mode"])
         time_zero = torch.zeros((1, 1), device=device, dtype=source.dtype)
         endpoint = head(context, model.model.embed_tokens(output_ids[:, start_idx:start_idx + 1]).reshape(1, 1, -1), source, time_zero)
         proposal = sample_greedy(model.lm_head(endpoint.reshape(-1, endpoint.shape[-1]))).reshape(1, -1)[:, :diff_len - 1]
@@ -127,12 +127,12 @@ def main() -> None:
     model = model.to(device=device, dtype=dtype).eval()
     tokenizer, prompts = load_tokenizer(metadata["base_model"]), load_prompts(args.prompts_jsonl)
     for row in prompts[:args.warmup_prompts]:
-        generate_feature_flow_greedy(model, head, encode_prompt(tokenizer, row["prompt"], device), min(16, args.max_new_tokens), tokenizer.eos_token_id)
+        generate_feature_flow_greedy(model, head, encode_prompt(tokenizer, row["prompt"], device), min(16, args.max_new_tokens), tokenizer.eos_token_id, config)
     rows = []
     for row in prompts:
         input_ids = encode_prompt(tokenizer, row["prompt"], device)
         ar_ids, ar_seconds, ar_forwards = generate_ar_greedy(model, input_ids, args.max_new_tokens, tokenizer.eos_token_id)
-        flow_ids, flow_seconds, target_forwards, head_calls, acceptance = generate_feature_flow_greedy(model, head, input_ids, args.max_new_tokens, tokenizer.eos_token_id)
+        flow_ids, flow_seconds, target_forwards, head_calls, acceptance = generate_feature_flow_greedy(model, head, input_ids, args.max_new_tokens, tokenizer.eos_token_id, config)
         ar_new, flow_new = int(ar_ids.shape[1] - input_ids.shape[1]), int(flow_ids.shape[1] - input_ids.shape[1])
         record = {
             "id": row["id"], "parity_ok": bool(torch.equal(ar_ids, flow_ids)), "first_mismatch_at": first_mismatch(ar_ids, flow_ids),

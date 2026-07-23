@@ -124,13 +124,24 @@ def feature_flow_source(
     context_hidden: torch.Tensor,
     prediction_length: int,
     generator: torch.Generator | None = None,
+    mode: str = "gaussian",
 ) -> torch.Tensor:
-    """Deployment-identical isotropic source, scaled only by cached context."""
+    """Create a deployment-identical conditional CFM source trajectory.
+
+    ``context`` is a deterministic conditional base distribution for greedy
+    decoding: it retains the AR feature geometry instead of forcing the map to
+    denoise irrelevant random coordinates before it can predict token one.
+    ``gaussian`` remains available for stochastic-source ablations.
+    """
 
     if context_hidden.dim() != 3:
         raise ValueError("context_hidden must have shape [B, anchors, H]")
-    rms = context_hidden.float().square().mean(dim=-1, keepdim=True).add(1e-6).sqrt()
     shape = context_hidden.shape[:2] + (prediction_length, context_hidden.shape[-1])
+    if mode == "context":
+        return context_hidden.unsqueeze(2).expand(shape)
+    if mode != "gaussian":
+        raise ValueError(f"Unsupported feature-flow source mode: {mode}")
+    rms = context_hidden.float().square().mean(dim=-1, keepdim=True).add(1e-6).sqrt()
     return torch.randn(shape, device=context_hidden.device, dtype=context_hidden.dtype, generator=generator) * rms.unsqueeze(2).to(context_hidden.dtype)
 
 
