@@ -842,16 +842,20 @@ def main() -> None:
                     state_max=args.flow_state_max,
                     device=device,
                     flow_objective=args.flow_objective,
-                    diagonal_fraction=(
-                        args.diagonal_fraction
-                        if global_step >= args.consistency_start_step
-                        else 1.0
-                    ),
+                    # Stage 1 always contains diagonal VFM and exact 0 -> 1
+                    # teacher proposals. Stage 2 replaces half of the latter
+                    # with interior ECLD pairs; it must not remove the direct
+                    # proposal signal during warm-up.
+                    diagonal_fraction=args.diagonal_fraction,
                     time_logit_mean=args.flow_time_logit_mean,
                     time_logit_std=args.flow_time_logit_std,
                     time_max=args.flow_time_max,
                     time_conditioning_scale=args.flow_time_conditioning_scale,
-                    one_jump_fraction=args.one_jump_fraction,
+                    one_jump_fraction=(
+                        args.one_jump_fraction
+                        if global_step >= args.consistency_start_step
+                        else 1.0
+                    ),
                     source_prior=args.source_prior,
                     source_generator=source_generator,
                 )
