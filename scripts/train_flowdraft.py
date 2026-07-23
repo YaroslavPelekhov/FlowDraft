@@ -767,10 +767,13 @@ def main() -> None:
     running_loss = 0.0
     running_ce_loss = 0.0
     running_direct_teacher_kl = 0.0
+    running_direct_teacher_contribution = 0.0
     running_hard_ce_loss = 0.0
     running_prefix_loss = 0.0
+    running_direct_prefix_contribution = 0.0
     running_prefix_kl_loss = 0.0
     running_consistency_loss = 0.0
+    running_consistency_contribution = 0.0
     running_endpoint_consistency = 0.0
     running_temporal_drift = 0.0
     running_acc = 0.0
@@ -932,15 +935,23 @@ def main() -> None:
                     + args.consistency_weight
                     * (4.0 * endpoint_consistency + 2.0 * args.temporal_drift_weight * temporal_drift)
                 )
+                direct_teacher_contribution = args.direct_endpoint_teacher_weight * direct_teacher_kl
+                direct_prefix_contribution = args.prefix_loss_weight * direct_prefix_loss
+                consistency_contribution = args.consistency_weight * (
+                    4.0 * endpoint_consistency + 2.0 * args.temporal_drift_weight * temporal_drift
+                )
                 (loss / args.gradient_accumulation_steps).backward()
 
                 running_loss += float(loss.detach().cpu())
                 running_ce_loss += float(ce_loss.detach().cpu())
                 running_direct_teacher_kl += float(direct_teacher_kl.detach().cpu())
+                running_direct_teacher_contribution += float(direct_teacher_contribution.detach().cpu())
                 running_hard_ce_loss += float(hard_ce_loss.detach().cpu())
                 running_prefix_loss += float(direct_prefix_loss.detach().cpu())
+                running_direct_prefix_contribution += float(direct_prefix_contribution.detach().cpu())
                 running_prefix_kl_loss += float(prefix_kl_loss.detach().cpu())
                 running_consistency_loss += float(consistency.detach().cpu())
+                running_consistency_contribution += float(consistency_contribution.detach().cpu())
                 running_endpoint_consistency += float(endpoint_consistency.detach().cpu())
                 running_temporal_drift += float(temporal_drift.detach().cpu())
                 reported_top1 = direct_top1 if args.flow_objective == "ecld" else token_accuracy(
@@ -971,10 +982,13 @@ def main() -> None:
                         avg_loss = running_loss / denom
                         avg_ce = running_ce_loss / denom
                         avg_direct_teacher_kl = running_direct_teacher_kl / denom
+                        avg_direct_teacher_contribution = running_direct_teacher_contribution / denom
                         avg_hard_ce = running_hard_ce_loss / denom
                         avg_prefix = running_prefix_loss / denom
+                        avg_direct_prefix_contribution = running_direct_prefix_contribution / denom
                         avg_prefix_kl = running_prefix_kl_loss / denom
                         avg_consistency = running_consistency_loss / denom
+                        avg_consistency_contribution = running_consistency_contribution / denom
                         avg_endpoint_consistency = running_endpoint_consistency / denom
                         avg_temporal_drift = running_temporal_drift / denom
                         avg_acc = running_acc / denom
@@ -991,15 +1005,18 @@ def main() -> None:
                             "teacher_kl": avg_ce,
                             "direct_endpoint_teacher_kl": avg_direct_teacher_kl,
                             "direct_endpoint_teacher_weight": args.direct_endpoint_teacher_weight,
+                            "direct_endpoint_teacher_contribution": avg_direct_teacher_contribution,
                             "kl_reduction": args.kl_reduction,
                             "hard_ce": avg_hard_ce,
                             "hard_ce_weight": args.hard_ce_weight,
                             "prefix_ce": avg_prefix,
                             "prefix_loss_weight": args.prefix_loss_weight,
+                            "prefix_contribution": avg_direct_prefix_contribution,
                             "prefix_kl": avg_prefix_kl,
                             "prefix_kl_weight": args.prefix_kl_weight,
                             "prefix_weight_decay": args.prefix_weight_decay,
                             "consistency_loss": avg_consistency,
+                            "consistency_contribution": avg_consistency_contribution,
                             "endpoint_consistency_ce": avg_endpoint_consistency,
                             "temporal_drift": avg_temporal_drift,
                             "top1": avg_acc,
@@ -1015,8 +1032,10 @@ def main() -> None:
                         print(
                             f"step={global_step} loss={avg_loss:.5f} teacher_kl={avg_ce:.5f} "
                             f"direct_kl={avg_direct_teacher_kl:.5f} "
+                            f"direct_term={avg_direct_teacher_contribution:.5f} "
                             f"hard_ce={avg_hard_ce:.5f} prefix_ce={avg_prefix:.5f} "
-                            f"prefix_kl={avg_prefix_kl:.5f} consistency={avg_consistency:.5f} "
+                            f"prefix_kl={avg_prefix_kl:.5f} prefix_term={avg_direct_prefix_contribution:.5f} "
+                            f"consistency={avg_consistency:.5f} consistency_term={avg_consistency_contribution:.5f} "
                             f"endpoint_ce={avg_endpoint_consistency:.5f} drift={avg_temporal_drift:.5f} "
                             f"top1={avg_acc:.4f} first={avg_first_acc:.4f} "
                             f"greedy_prefix={avg_greedy_prefix_acceptance:.2f} "
@@ -1028,10 +1047,13 @@ def main() -> None:
                         running_loss = 0.0
                         running_ce_loss = 0.0
                         running_direct_teacher_kl = 0.0
+                        running_direct_teacher_contribution = 0.0
                         running_hard_ce_loss = 0.0
                         running_prefix_loss = 0.0
+                        running_direct_prefix_contribution = 0.0
                         running_prefix_kl_loss = 0.0
                         running_consistency_loss = 0.0
+                        running_consistency_contribution = 0.0
                         running_endpoint_consistency = 0.0
                         running_temporal_drift = 0.0
                         running_acc = 0.0

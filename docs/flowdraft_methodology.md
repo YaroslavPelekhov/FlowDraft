@@ -37,8 +37,10 @@ Training is staged, but the primary CFM ablation isolates the two terms below.
 
 1. Teacher-VFM stage: all anchors use diagonal states `x_t`. The primary loss
    is forward KL from the frozen AR distribution.
-2. Flow-map stage: 75% of blocks remain diagonal and 25% use `s<t`. The
-   off-diagonal ECLD objective is
+2. Flow-map stage: 50% of blocks remain diagonal, 37.5% are exact
+   one-jump `(0,1)` proposals, and 12.5% use interior `s<t` pairs. The
+   exact boundary proposals are supervised directly by the frozen AR teacher
+   and a prefix-weighted CE term. ECLD is applied only to interior pairs:
 
 ```text
 L_ECLD = 4 * w_t * CE(stopgrad(pi_t,t(X_s,t)), pi_s,t(x_s))
@@ -46,16 +48,19 @@ L_ECLD = 4 * w_t * CE(stopgrad(pi_t,t(X_s,t)), pi_s,t(x_s))
 gamma = (t - s) / (1 - s).
 ```
 
-The default loss is
+The default stage-2 loss is
 
 ```text
-L = L_teacher_VFM + lambda_ECLD * L_ECLD.
+L = L_diagonal_teacher + lambda_direct * L_one_jump_teacher
+    + lambda_prefix * L_one_jump_prefix + lambda_ECLD * L_ECLD.
 ```
 
 `w_t=(1-t)^-2` is clamped at a denominator of `0.05` in the paper-style
 configuration. A uniform-weight variant is retained only as an explicit
-stability ablation. Prefix and hard-label acceptance losses are separate
-ablations, not part of the base CFM claim.
+stability ablation. The boundary pairs are excluded from ECLD because its
+time weight is singular at `t=1`. Every run records the unweighted loss and
+the weighted contribution of each term, so a scale mismatch is visible before
+benchmarking.
 
 ## Single-A100 approximations
 

@@ -36,9 +36,9 @@ temporal_drift_weight: 1.0
 # adds exact (0 -> 1) frozen-AR distillation with prefix-weighted CE, while
 # ECLD is restricted to the remaining interior trajectory pairs.
 hard_ce_weight: 0.0
-prefix_loss_weight: 0.20
+prefix_loss_weight: 0.05
 prefix_kl_weight: 0.0
-direct_endpoint_teacher_weight: 1.0
+direct_endpoint_teacher_weight: 0.05
 consistency_weight: 0.00025
 consistency_start_step: 50
 
