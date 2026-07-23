@@ -13,6 +13,7 @@ from orthrus_training.flowdraft import (
     transport_categorical_state,
 )
 from orthrus_training.modeling import FlowDraftStateAdapter
+from orthrus_training.residual_flow import ResidualFlowCorrector, verifier_margin
 from orthrus_training.flowtree import (
     ancestor_matrix,
     build_flowtree,
@@ -260,6 +261,25 @@ def test_bounded_jsd_is_zero_for_identical_logits_and_bounded():
 
     assert torch.isclose(identical, torch.tensor(0.0), atol=1e-7)
     assert 0.0 < different < torch.log(torch.tensor(2.0))
+
+
+def test_residual_flow_corrector_is_zero_update_at_initialization():
+    corrector = ResidualFlowCorrector(
+        hidden_size=8,
+        block_size=5,
+        bottleneck_size=12,
+        num_layers=1,
+        num_heads=3,
+    )
+    hidden = torch.randn((2, 8, 8))
+    candidate = torch.randn_like(hidden)
+    residual = torch.randn_like(hidden)
+    logits = torch.randn((2, 8, 11))
+
+    correction = corrector(hidden, candidate, residual, verifier_margin(logits))
+
+    assert correction.shape == hidden.shape
+    assert torch.allclose(correction, torch.zeros_like(hidden))
 
 
 def test_verifier_aligned_loss_stops_acceptance_at_first_mismatch():

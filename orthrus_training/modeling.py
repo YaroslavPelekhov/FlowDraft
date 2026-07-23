@@ -163,15 +163,20 @@ def parallel_ar_verifier_mode(model: torch.nn.Module):
 
 
 @torch.no_grad()
-def parallel_verifier_logits(
+def parallel_verifier_outputs(
     model: torch.nn.Module,
     proposed_blocks: torch.Tensor,
     position_ids: torch.Tensor,
     causal_limit: torch.Tensor,
     past_key_values,
     ar_seq_len: int,
-) -> torch.Tensor:
-    """Evaluate K-token proposals with frozen AR QKV in one block-parallel pass."""
+    output_hidden_states: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Evaluate K-token proposals with frozen AR QKV in one block-parallel pass.
+
+    The optional final hidden state lets a lightweight residual corrector reuse
+    verifier computation instead of running another backbone to inspect errors.
+    """
 
     batch_size, num_blocks, block_size = proposed_blocks.shape
     flat_blocks = proposed_blocks.reshape(batch_size, num_blocks * block_size)
@@ -184,11 +189,41 @@ def parallel_verifier_logits(
             is_diffusion_pass=True,
             causal_limit=causal_limit,
             ar_seq_len=ar_seq_len,
+            output_hidden_states=output_hidden_states,
         )
     logits = outputs.logits.reshape(batch_size, num_blocks, block_size, -1)
-    return logits[:, :, : block_size - 1, :].reshape(
+    selected_logits = logits[:, :, : block_size - 1, :].reshape(
         batch_size, num_blocks * (block_size - 1), -1
     )
+    hidden = None
+    if output_hidden_states:
+        if not outputs.hidden_states:
+            raise RuntimeError("Verifier did not return hidden states")
+        hidden = outputs.hidden_states[-1].reshape(batch_size, num_blocks, block_size, -1)
+        hidden = hidden[:, :, : block_size - 1, :].reshape(batch_size, num_blocks * (block_size - 1), -1)
+    return selected_logits, hidden
+
+
+@torch.no_grad()
+def parallel_verifier_logits(
+    model: torch.nn.Module,
+    proposed_blocks: torch.Tensor,
+    position_ids: torch.Tensor,
+    causal_limit: torch.Tensor,
+    past_key_values,
+    ar_seq_len: int,
+) -> torch.Tensor:
+    """Evaluate K-token proposals with frozen AR QKV in one block-parallel pass."""
+
+    logits, _ = parallel_verifier_outputs(
+        model=model,
+        proposed_blocks=proposed_blocks,
+        position_ids=position_ids,
+        causal_limit=causal_limit,
+        past_key_values=past_key_values,
+        ar_seq_len=ar_seq_len,
+    )
+    return logits
 
 
 @contextmanager
