@@ -15,7 +15,7 @@ mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$HF_MODULES_CACHE" "$XDG_CACHE_HOME" "
 TRAIN_MANIFEST="${TRAIN_MANIFEST:-/workspace/flowdraft_data/nemotron_50k/manifest.json}"
 EVAL_MANIFEST="${EVAL_MANIFEST:-/workspace/flowdraft_data/nemotron_50k_holdout/manifest.json}"
 INIT_CHECKPOINT="${INIT_CHECKPOINT:-/workspace/flowdraft_runs/flowdraft_v4_full_300/best}"
-OUT_DIR="${OUT_DIR:-/workspace/flowdraft_runs/simplex_flow_rescue_probe_300_r1}"
+OUT_DIR="${OUT_DIR:-/workspace/flowdraft_runs/simplex_flow_rescue_probe_300_r2}"
 BANK_DIR="${BANK_DIR:-/workspace/flowdraft_runs/simplex_flow_rescue_bank_512_r1}"
 MAX_STEPS="${MAX_STEPS:-300}"
 CALIBRATION_BATCHES="${CALIBRATION_BATCHES:-512}"
@@ -43,8 +43,6 @@ if [ ! -f "$BANK_DIR/rescue_bank.safetensors" ]; then
 else
   log "Reusing immutable rescue bank at $BANK_DIR"
 fi
-cp "$BANK_DIR"/rescue_bank_config.json "$OUT_DIR"/rescue_bank_config.json
-cp "$BANK_DIR"/calibration_report.json "$OUT_DIR"/rescue_bank_calibration_report.json
 log "Training CFM on top-96 plus rescue-32 candidate support"
 "$PYTHON_BIN" scripts/train_simplex_flow.py \
   --config configs/simplex_flow_rescue_probe.yaml \
@@ -54,6 +52,8 @@ log "Training CFM on top-96 plus rescue-32 candidate support"
   --rescue-bank "$BANK_DIR" \
   --output-dir "$OUT_DIR" \
   --max-steps "$MAX_STEPS"
+cp "$BANK_DIR"/rescue_bank_config.json "$OUT_DIR"/rescue_bank_config.json
+cp "$BANK_DIR"/calibration_report.json "$OUT_DIR"/rescue_bank_calibration_report.json
 CHECKPOINT="$OUT_DIR/best"; [ -f "$CHECKPOINT/simplex_flow.safetensors" ] || CHECKPOINT="$OUT_DIR/last"
 log "Strict FP32 greedy losslessness gate with adaptive simplex support"
 "$PYTHON_BIN" scripts/benchmark_simplex_flow.py \
