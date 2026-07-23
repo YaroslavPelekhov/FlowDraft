@@ -1,0 +1,67 @@
+{
+  "created_at_utc": "2026-07-23T06:34:12.866084+00:00",
+  "files": [
+    {
+      "bytes": 18330,
+      "path": "benchmark_bf16_throughput_metrics.jsonl",
+      "sha256": "2baab0c4020e6ced916ce5e2666bcfbdc19cc9ffba26f0b798e23bab48382f8a"
+    },
+    {
+      "bytes": 1659,
+      "path": "benchmark_bf16_throughput_summary.json",
+      "sha256": "cc0f0d9098bf2377f638f4b222f2d8fcd9e93cf2ec62afe8552847d2e68c917f"
+    },
+    {
+      "bytes": 22171,
+      "path": "benchmark_fp32_lossless_metrics.jsonl",
+      "sha256": "64f01ec37d62d08bf91461c100d2d4588989b2bf0fc42111005b48c4b48fd334"
+    },
+    {
+      "bytes": 1676,
+      "path": "benchmark_fp32_lossless_summary.json",
+      "sha256": "bea829d36e23b3292dbcae45067bfd69de38af054ff5a987e55079e4d0b4e2a9"
+    },
+    {
+      "bytes": 472,
+      "path": "best_metrics.json",
+      "sha256": "4509a1b44f8d1fa3803b85188b9c93181f9bd66846f39ed6de6d30e67444c3f3"
+    },
+    {
+      "bytes": 115,
+      "path": "last_metrics.json",
+      "sha256": "f6ce3950d1686f6737350b49ecabd1292d9b08d67198d26409d82316fb075b0d"
+    },
+    {
+      "bytes": 116540,
+      "path": "run.log",
+      "sha256": "d3ca584de79b76acabd7b82abc27a0e04e1fdbdc9d7a3bc81bcbdd4cb56f41e6"
+    },
+    {
+      "bytes": 1971,
+      "path": "run_config.json",
+      "sha256": "e3966a2e7cc703b167e52346d919a6f4773310f27f1dbaf1d11b702632d1aae2"
+    },
+    {
+      "bytes": 4428,
+      "path": "run_manifest.json",
+      "sha256": "26459b2e5fbb6c9f2c150c0db6dacfea8afaad85d693a92911cb3eda6269fdda"
+    },
+    {
+      "bytes": 200,
+      "path": "source_commit.json",
+      "sha256": "d99231a94477a2748ebb323e6d1f6dd998c0ecd3f924cd30ef25dd5c4ebdc60d"
+    },
+    {
+      "bytes": 61830,
+      "path": "train_metrics.jsonl",
+      "sha256": "16e87a862910611e9731254c98559b568ca06bc91555eb81474d786173deacd7"
+    }
+  ],
+  "git": {
+    "branch": "main",
+    "commit": "d26e7db9801ba0d5fec1fea52f904d30daac020d",
+    "status": "?? experiments/20260723_flowdraft_v3_full_600/\n?? paper/\n?? tmp/"
+  },
+  "record_id": "20260723_flowdraft_v3_full_600",
+  "source_dir_name": "flowdraft_v3_record.wC5KoY"
+}

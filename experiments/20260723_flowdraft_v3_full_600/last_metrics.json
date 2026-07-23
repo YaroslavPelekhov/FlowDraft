@@ -1,0 +1,6 @@
+{
+  "best_eval_greedy_prefix_acceptance": 1.75,
+  "best_step": 400,
+  "last_step": 600,
+  "stopped_early": false
+}

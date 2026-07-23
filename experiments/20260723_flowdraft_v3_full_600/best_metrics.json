@@ -1,0 +1,16 @@
+{
+  "best_step": 400,
+  "epoch": 0,
+  "eval_batches": 8,
+  "eval_endpoint_kl": 1.5150094479322433,
+  "eval_endpoint_top1_ce": 1.6751961410045624,
+  "eval_first_token_accuracy": 0.921875,
+  "eval_greedy_prefix_acceptance": 1.75,
+  "eval_loss": 6.936891853809357,
+  "eval_proposal_forward_kl": 1.3793956860899925,
+  "eval_proposal_reverse_kl": 3.0041906535625458,
+  "eval_proposal_top1_ce": 1.7027932554483414,
+  "eval_semigroup_jsd": 0.0,
+  "kind": "eval",
+  "step": 400
+}
