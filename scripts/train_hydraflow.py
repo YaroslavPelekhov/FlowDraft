@@ -216,7 +216,8 @@ def main() -> None:
         raise ValueError("flow_time_min must be in [0, 1)")
     set_seed(args.seed)
     output_dir = Path(args.output_dir)
-    if output_dir.exists() and {item.name for item in output_dir.iterdir()} - {"run.log"}:
+    allowed_existing_files = {"run.log", "supervisor.log", "supervisor.err.log"}
+    if output_dir.exists() and {item.name for item in output_dir.iterdir()} - allowed_existing_files:
         raise FileExistsError(f"Refusing to overwrite existing experiment: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     train_unique, eval_unique = assert_disjoint_packed_manifests(args.train_manifest, args.eval_manifest)
