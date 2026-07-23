@@ -362,8 +362,11 @@ def test_parallel_eagleflow_generates_all_block_endpoints_in_one_call():
     head = ParallelEagleFlowDrafter(hidden_size=8, block_size=5, state_size=8, num_layers=2, num_heads=2)
     context = torch.randn((2, 3, 8))
     anchor = torch.randn((2, 3, 8))
+    teacher = torch.randn((2, 3, 4, 8))
 
     hidden, embeddings = head.rollout(context, anchor)
+    forced_hidden, _ = head.rollout(context, anchor, teacher_embeddings=teacher, teacher_forcing_ratio=1.0)
 
     assert hidden.shape == embeddings.shape == (2, 3, 4, 8)
     assert torch.isfinite(hidden).all()
+    assert not torch.allclose(hidden[:, :, 1:], forced_hidden[:, :, 1:])

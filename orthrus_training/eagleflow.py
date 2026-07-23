@@ -270,7 +270,7 @@ class ParallelEagleFlowDrafter(nn.Module):
         flow_targets: torch.Tensor | None = None,
         flow_time: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        del teacher_embeddings, teacher_features, teacher_forcing_ratio, feedback_embedding_fn
+        del teacher_features, feedback_embedding_fn
         if context_hidden.shape != anchor_embeddings.shape:
             raise ValueError("context_hidden and anchor_embeddings must have identical shapes")
         if context_hidden.dim() != 3 or context_hidden.shape[-1] != self.hidden_size:
@@ -278,6 +278,10 @@ class ParallelEagleFlowDrafter(nn.Module):
         expected = context_hidden.shape[:2] + (self.prediction_length, self.hidden_size)
         if flow_targets is not None and flow_targets.shape != expected:
             raise ValueError(f"Expected flow_targets shape {expected}, got {tuple(flow_targets.shape)}")
+        if teacher_embeddings is not None and teacher_embeddings.shape != expected:
+            raise ValueError(f"Expected teacher_embeddings shape {expected}, got {tuple(teacher_embeddings.shape)}")
+        if not 0.0 <= teacher_forcing_ratio <= 1.0:
+            raise ValueError("teacher_forcing_ratio must be in [0, 1]")
         batch_size, blocks, _ = context_hidden.shape
         if flow_time is None:
             flow_time = torch.zeros((batch_size, blocks, 1), device=context_hidden.device, dtype=context_hidden.dtype)
@@ -288,10 +292,21 @@ class ParallelEagleFlowDrafter(nn.Module):
         feature = feature.expand(-1, self.prediction_length, -1) + self.position
         anchor = anchor_embeddings.reshape(flat, 1, self.hidden_size)
         token = torch.cat((anchor, self.source_tokens.expand(flat, -1, -1)), dim=1)
+        teacher_shift = None
+        if teacher_embeddings is not None:
+            targets = teacher_embeddings.reshape(flat, self.prediction_length, self.hidden_size)
+            teacher_shift = torch.cat((anchor, targets[:, :-1, :]), dim=1)
         for layer in self.layers:
             feature = layer(feature, token)
             continuous = self.embedding_endpoint(self.token_norm(feature))
-            token = torch.cat((anchor, continuous[:, :-1, :].detach()), dim=1)
+            predicted_shift = torch.cat((anchor, continuous[:, :-1, :]), dim=1)
+            if teacher_shift is None or teacher_forcing_ratio <= 0.0:
+                token = predicted_shift
+            elif teacher_forcing_ratio >= 1.0:
+                token = teacher_shift
+            else:
+                use_teacher = torch.rand((flat, 1, 1), device=feature.device) < teacher_forcing_ratio
+                token = torch.where(use_teacher, teacher_shift, predicted_shift)
         source = feature + self.source_residual(self.source_norm(feature))
         source = source.reshape(batch_size, blocks, self.prediction_length, self.hidden_size)
         interpolant = source if flow_targets is None else (1.0 - flow_time.unsqueeze(2)) * source + flow_time.unsqueeze(2) * flow_targets

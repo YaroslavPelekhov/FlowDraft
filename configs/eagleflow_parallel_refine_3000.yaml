@@ -1,0 +1,36 @@
+# End-to-end continuous advanced-token refinement. The teacher-token route is
+# only a bootstrap for the internal flow layers and decays to exactly zero,
+# matching the one-pass inference graph.
+max_steps: 3000
+batch_size: 1
+num_anchor_blocks: 64
+learning_rate: 2.5e-4
+warmup_ratio: 0.04
+weight_decay: 0.01
+max_grad_norm: 1.0
+hidden_loss_weight: 0.10
+embedding_loss_weight: 0.10
+prefix_loss_weight: 1.25
+prefix_weight_decay: 0.85
+state_size: 768
+num_layers: 3
+num_heads: 12
+drafter_mode: parallel
+dropout: 0.0
+teacher_forcing_start: 0.80
+teacher_forcing_end: 0.0
+teacher_forcing_decay_ratio: 0.35
+feedback_mode: continuous
+flow_diagonal_fraction: 0.15
+flow_diagonal_loss_weight: 0.06
+flow_consistency_weight: 0.02
+flow_time_min: 0.05
+dtype: bf16
+attn_implementation: eager
+eval_every: 200
+eval_batches: 32
+eval_anchor_blocks: 64
+early_stopping_patience: 8
+seed: 283
+num_workers: 2
+log_every: 20
