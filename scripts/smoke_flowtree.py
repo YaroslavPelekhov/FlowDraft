@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import os
 import sys
 from pathlib import Path
@@ -18,8 +19,8 @@ from orthrus_training.flowdraft import (
     make_discrete_flowdraft_state,
     sample_categorical_source_tokens,
 )
-from orthrus_training.flowtree import ancestor_matrix, build_flowtree
-from orthrus_training.modeling import flowtree_verifier_logits, load_flowdraft_adapter, load_tokenizer
+from orthrus_training.flowtree import build_flowtree, leaf_paths
+from orthrus_training.modeling import load_flowdraft_adapter, load_tokenizer
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt", default="Write a Python function that returns the square of an integer.")
     parser.add_argument("--branch-width", type=int, default=2)
     parser.add_argument("--branch-depth", type=int, default=3)
-    parser.add_argument("--max-nodes", type=int, default=64)
+    parser.add_argument("--max-nodes", type=int, default=256)
     parser.add_argument("--dtype", choices=["fp32", "bf16"], default="fp32")
     return parser.parse_args()
 
@@ -116,58 +117,51 @@ def main() -> None:
         branch_depth=args.branch_depth,
         max_nodes=args.max_nodes,
     )
-    positions = (start_idx + tree.depths).unsqueeze(0)
-    limits = torch.full((1, tree.num_nodes), start_idx - 1, device=device, dtype=torch.long)
-    tree_logits = flowtree_verifier_logits(
-        model,
-        tree.token_ids.unsqueeze(0),
-        positions,
-        ancestor_matrix(tree.parents),
-        limits,
-        past,
-        ar_seq_len=start_idx,
-    )[0]
-
-    # Replay only the selected linear branch. This is a conservative cache
-    # update; future work will gather the selected KV path directly.
-    replay_root = model(
-        input_ids=anchor,
-        position_ids=torch.tensor([[start_idx]], device=device),
-        past_key_values=past,
+    paths = leaf_paths(tree)
+    path_tokens = tree.token_ids[paths]
+    path_len = int(path_tokens.shape[1])
+    branch_cache = copy.deepcopy(past)
+    branch_cache.batch_repeat_interleave(path_tokens.shape[0])
+    positions = (
+        start_idx + torch.arange(path_len, device=device)
+    ).unsqueeze(0).expand(path_tokens.shape[0], -1)
+    # This is an ordinary causal AR forward, batched over FlowTree leaves.
+    # It is the conservative v1 verifier and has no custom attention kernel.
+    branch_output = model(
+        input_ids=path_tokens,
+        position_ids=positions,
+        past_key_values=branch_cache,
         use_cache=True,
+        is_diffusion_pass=False,
     )
-    selected = [0]
-    current = 0
-    while True:
-        expected = int(tree_logits[current].argmax().item())
-        children = torch.nonzero(tree.parents == current, as_tuple=False).flatten()
-        matches = children[tree.token_ids[children] == expected]
-        if matches.numel() == 0:
-            break
-        current = int(matches[0])
-        selected.append(current)
+    branch_tokens = branch_output.logits.argmax(dim=-1)
+    matches = path_tokens[:, 1:] == branch_tokens[:, :-1]
+    accepted = matches.to(torch.int64).cumprod(dim=-1).sum(dim=-1)
+    selected_branch = int(accepted.argmax().item())
+    acceptance = int(accepted[selected_branch].item())
 
-    replay_logits = [replay_root.logits[0, -1]]
-    if len(selected) > 1:
-        child_tokens = tree.token_ids[selected[1:]].unsqueeze(0)
-        child_positions = positions[:, selected[1:]]
-        replay = model(
-            input_ids=child_tokens,
-            position_ids=child_positions,
-            past_key_values=past,
-            use_cache=True,
-        )
-        replay_logits.extend(replay.logits[0])
-
-    tree_path_logits = tree_logits[torch.tensor(selected, device=device)]
-    tree_tokens = tree_path_logits.argmax(dim=-1)
-    replay_tokens = torch.stack(replay_logits).argmax(dim=-1)
-    exact = bool(torch.equal(tree_tokens, replay_tokens))
+    # Strictly compare the winning batched branch with an ordinary single-path
+    # replay before allowing this verifier to become a decoding primitive.
+    replay_cache = copy.deepcopy(past)
+    replay = model(
+        input_ids=path_tokens[selected_branch : selected_branch + 1],
+        position_ids=positions[selected_branch : selected_branch + 1],
+        past_key_values=replay_cache,
+        use_cache=True,
+        is_diffusion_pass=False,
+    )
+    exact = bool(torch.equal(branch_tokens[selected_branch], replay.logits[0].argmax(dim=-1)))
+    mismatch = (branch_tokens[selected_branch] != replay.logits[0].argmax(dim=-1)).nonzero(as_tuple=False).flatten()
+    mismatch_at = int(mismatch[0]) if mismatch.numel() else None
     print(
         "FLOWTREE_SMOKE "
-        f"nodes={tree.num_nodes} selected_depth={len(selected) - 1} "
-        f"tree_vs_replay_parity={exact} root_margin="
-        f"{float(tree_logits[0].float().topk(2).values.diff().abs().item()):.4f}"
+        f"nodes={tree.num_nodes} leaves={path_tokens.shape[0]} "
+        f"best_accepted={acceptance} batched_vs_replay_parity={exact}"
+    )
+    print(
+        f"FLOWTREE_PATH selected_leaf={selected_branch} "
+        f"batched_tokens={branch_tokens[selected_branch].tolist()} "
+        f"replay_tokens={replay.logits[0].argmax(dim=-1).tolist()} mismatch_at={mismatch_at}"
     )
     if not exact:
         raise SystemExit("FlowTree verifier disagrees with linear AR replay")

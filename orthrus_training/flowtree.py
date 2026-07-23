@@ -109,6 +109,29 @@ def greedy_path_coverage(tree: FlowTree, teacher_tokens: torch.Tensor) -> int:
     return covered
 
 
+def leaf_paths(tree: FlowTree) -> torch.Tensor:
+    """Materialize equal-depth root-to-leaf paths for causal batch verification."""
+
+    child_count = torch.bincount(tree.parents[1:], minlength=tree.num_nodes)
+    leaves = torch.nonzero(child_count == 0, as_tuple=False).flatten()
+    if leaves.numel() == 0:
+        raise ValueError("FlowTree has no leaves")
+    max_depth = tree.depths[leaves].max()
+    leaves = leaves[tree.depths[leaves] == max_depth]
+    paths: list[list[int]] = []
+    for leaf in leaves.tolist():
+        path = []
+        current = leaf
+        while current >= 0:
+            path.append(current)
+            current = int(tree.parents[current])
+        paths.append(list(reversed(path)))
+    lengths = {len(path) for path in paths}
+    if len(lengths) != 1:
+        raise ValueError("FlowTree leaves must share a depth for batched verification")
+    return torch.tensor(paths, dtype=torch.long, device=tree.token_ids.device)
+
+
 def soft_topk_coverage_loss(
     logits: torch.Tensor,
     target_ids: torch.Tensor,
