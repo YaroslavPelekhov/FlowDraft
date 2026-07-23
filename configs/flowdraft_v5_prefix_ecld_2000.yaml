@@ -23,7 +23,9 @@ temperature: 1.0
 kl_reduction: tokenmean
 
 flow_objective: ecld
-diagonal_fraction: 0.55
+# With 128 anchors, 68 diagonal and 60 off-diagonal blocks keep the ECLD
+# FlexAttention sequence length (60 * 32) divisible by its required 128.
+diagonal_fraction: 0.53125
 one_jump_fraction: 0.55
 flow_time_logit_mean: -0.4
 flow_time_logit_std: 1.0
