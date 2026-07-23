@@ -14,6 +14,7 @@ from orthrus_training.flowdraft import (
 )
 from orthrus_training.modeling import FlowDraftStateAdapter
 from orthrus_training.residual_flow import ResidualFlowCorrector, verifier_margin
+from orthrus_training.cacheflow import CacheFlowTrajectoryHead, flow_source_from_context
 from orthrus_training.flowtree import (
     ancestor_matrix,
     build_flowtree,
@@ -299,3 +300,21 @@ def test_verifier_aligned_loss_stops_acceptance_at_first_mismatch():
     )
     assert losses["first_rejected_mask"].tolist() == [[False, False, True, False]]
     assert torch.isfinite(losses["reverse_kl"])
+
+
+def test_cacheflow_endpoint_shape_is_block_parallel_and_finite():
+    head = CacheFlowTrajectoryHead(
+        hidden_size=8,
+        block_size=5,
+        latent_size=16,
+        num_layers=1,
+        num_heads=4,
+    )
+    context = torch.randn((2, 3, 8))
+    anchor = torch.randn((2, 3, 8))
+    source = flow_source_from_context(context, prediction_length=4, generator=torch.Generator().manual_seed(7))
+
+    endpoint = head(context, anchor, source)
+
+    assert endpoint.shape == (2, 3, 4, 8)
+    assert torch.isfinite(endpoint).all()
