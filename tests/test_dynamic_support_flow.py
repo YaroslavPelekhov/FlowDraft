@@ -28,3 +28,4 @@ def test_dynamic_support_head_shapes_and_retrieval():
     scores = head.retrieval_scores(hidden, codebook)
     assert scores.shape == (2, 3, 4, 23)
     assert torch.isfinite(scores).all()
+    assert torch.equal(scores, torch.zeros_like(scores))

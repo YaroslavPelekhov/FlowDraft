@@ -125,6 +125,7 @@ def select_dynamic_candidate_support(
     candidate_count: int,
     dynamic_ids: torch.Tensor,
     base_candidate_count: int,
+    candidate_logits: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Merge parent top-k with context-specific retrieved token ids.
 
@@ -141,6 +142,9 @@ def select_dynamic_candidate_support(
         raise ValueError("dynamic_ids must match logits except for its final width")
     if dynamic_ids.dtype != torch.long or dynamic_ids.shape[-1] == 0:
         raise ValueError("dynamic_ids must be non-empty torch.long ids")
+    if candidate_logits is not None and candidate_logits.shape != logits.shape:
+        raise ValueError("candidate_logits must match logits")
+    value_logits = logits if candidate_logits is None else candidate_logits
     vocab_size = logits.shape[-1]
     if candidate_count > vocab_size:
         raise ValueError("candidate_count cannot exceed vocabulary size")
@@ -162,5 +166,5 @@ def select_dynamic_candidate_support(
     )
     selected_indices = (ranks.unsqueeze(-2) == wanted).to(torch.int64).argmax(dim=-1)
     ids = pool.gather(-1, selected_indices)
-    values = logits.gather(-1, ids)
+    values = value_logits.gather(-1, ids)
     return values, ids

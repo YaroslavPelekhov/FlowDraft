@@ -46,6 +46,8 @@ def parse_args():
     parser.add_argument("--candidate-count", type=int, default=128)
     parser.add_argument("--base-candidate-count", type=int, default=96)
     parser.add_argument("--retrieval-count", type=int, default=32)
+    parser.add_argument("--support-mode", choices=("retrieval_only", "residual"), default="retrieval_only")
+    parser.add_argument("--retrieval-residual-scale", type=float, default=8.0)
     parser.add_argument("--token-code-dim", type=int, default=32)
     parser.add_argument("--token-code-seed", type=int, default=20260723)
     parser.add_argument("--hidden-size", type=int, default=512)
@@ -158,14 +160,19 @@ def collect_batch(model, head, token_codebook, raw, blocks, args, generator):
         model, raw.to("cuda", non_blocking=True), blocks, generator, return_hidden=True
     )
     retrieval_scores = head.retrieval_scores(hidden, token_codebook)
-    dynamic_ids = retrieval_scores.topk(args.retrieval_count, dim=-1).indices
+    ranking_logits = (
+        logits + args.retrieval_residual_scale * retrieval_scores
+        if args.support_mode == "residual" else retrieval_scores
+    )
+    dynamic_ids = ranking_logits.topk(args.retrieval_count, dim=-1).indices
     values, ids = select_dynamic_candidate_support(
-        logits, args.candidate_count, dynamic_ids, args.base_candidate_count
+        logits, args.candidate_count, dynamic_ids, args.base_candidate_count,
+        candidate_logits=ranking_logits if args.support_mode == "residual" else None,
     )
     matches = ids.eq(teacher.unsqueeze(-1))
     covered = matches.any(dim=-1)
     targets = matches.to(torch.int64).argmax(dim=-1)
-    return values, ids, targets, teacher, covered, hidden, retrieval_scores
+    return values, ids, targets, teacher, covered, hidden, ranking_logits
 
 
 def retrieval_loss(scores, teacher, weights):
@@ -271,9 +278,9 @@ def main():
     eval_loader = DataLoader(PackedTokenDataset(args.eval_manifest), batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)
     config = vars(args) | {
         "format": "dynamic_support_categorical_flow_map_v1",
-        "method": "identity_aware_dynamic_support_endpoint_cfm",
+        "method": f"identity_aware_{args.support_mode}_support_endpoint_cfm",
         "objective": "root_endpoint_ce + diagonal_vfm_ce + ECLD + temporal_drift + hard_negative_retrieval",
-        "inference": "one frozen Orthrus diffusion pass, dynamic semantic support retrieval, cheap local-simplex CFM steps, one frozen AR verifier",
+        "inference": "one frozen Orthrus diffusion pass, baseline-preserving residual semantic support retrieval, cheap local-simplex CFM steps, one frozen AR verifier",
         "base_flowdraft_checkpoint": str(Path(args.init_checkpoint).resolve()),
         "base_flowdraft_adapter_sha256": sha256(Path(args.init_checkpoint) / "adapter_model.safetensors"),
         "block_size": int(model.config.block_size), "draft_hidden_size": int(model.config.hidden_size),

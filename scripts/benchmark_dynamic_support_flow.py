@@ -103,9 +103,15 @@ def generate_dynamic_support_greedy(model, head, codebook, config, input_ids, ma
             base_logits = draft.logits[:, :-1, :]
             hidden = draft.hidden_states[-1][:, :-1, :]
             scores = head.retrieval_scores(hidden, codebook)
-            retrieved = scores.topk(int(config["retrieval_count"]), dim=-1).indices
+            residual_mode = str(config.get("support_mode", "retrieval_only")) == "residual"
+            ranking_logits = (
+                base_logits + float(config.get("retrieval_residual_scale", 8.0)) * scores
+                if residual_mode else scores
+            )
+            retrieved = ranking_logits.topk(int(config["retrieval_count"]), dim=-1).indices
             values, candidates = select_dynamic_candidate_support(
-                base_logits, int(config["candidate_count"]), retrieved, int(config["base_candidate_count"])
+                base_logits, int(config["candidate_count"]), retrieved, int(config["base_candidate_count"]),
+                candidate_logits=ranking_logits if residual_mode else None,
             )
             if diff_len == block_size:
                 state = torch.full_like(values, 1.0 / head.candidate_count)

@@ -17,6 +17,7 @@ EVAL_MANIFEST="${EVAL_MANIFEST:-/workspace/flowdraft_data/nemotron_50k_holdout/m
 INIT_CHECKPOINT="${INIT_CHECKPOINT:-/workspace/flowdraft_runs/flowdraft_v4_full_300/best}"
 OUT_DIR="${OUT_DIR:-/workspace/flowdraft_runs/dynamic_support_flow_probe_300_r1}"
 MAX_STEPS="${MAX_STEPS:-300}"
+CONFIG="${CONFIG:-configs/dynamic_support_flow_probe.yaml}"
 HF_REPO_ID="${HF_REPO_ID:-}"
 HF_RUN_PATH="${HF_RUN_PATH:-}"
 
@@ -31,7 +32,7 @@ log "Dynamic-support CFM resource preflight"
 "$PYTHON_BIN" scripts/inspect_resources.py --paths / /workspace /dev/shm
 log "Training identity-aware CFM with dynamic semantic candidate support"
 "$PYTHON_BIN" scripts/train_dynamic_support_flow.py \
-  --config configs/dynamic_support_flow_probe.yaml \
+  --config "$CONFIG" \
   --init-checkpoint "$INIT_CHECKPOINT" \
   --train-manifest "$TRAIN_MANIFEST" \
   --eval-manifest "$EVAL_MANIFEST" \

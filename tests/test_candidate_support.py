@@ -39,3 +39,15 @@ def test_dynamic_support_keeps_parent_prefix_and_retrieved_ids():
     assert 6 in ids.tolist()[0][0]
     assert 5 in ids.tolist()[0][0]
     assert len(set(ids.tolist()[0][0])) == 5
+
+
+def test_residual_dynamic_support_starts_as_parent_topk():
+    logits = torch.randn(2, 3, 47)
+    retrieved = logits.topk(32 - 8, dim=-1).indices
+    values, ids = select_dynamic_candidate_support(
+        logits, candidate_count=32, dynamic_ids=retrieved, base_candidate_count=8,
+        candidate_logits=logits,
+    )
+    expected_values, expected_ids = logits.topk(32, dim=-1)
+    assert torch.equal(ids, expected_ids)
+    assert torch.equal(values, expected_values)

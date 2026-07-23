@@ -207,6 +207,11 @@ class DynamicSupportSimplexFlowRefiner(nn.Module):
         nn.init.zeros_(self.rank_delta.bias)
         nn.init.zeros_(self.identity_query.weight)
         nn.init.zeros_(self.identity_query.bias)
+        # A dynamic-support run starts as the unmodified parent top-k proposal.
+        # This is essential for a fair curriculum: retrieval must earn every
+        # displacement of a parent candidate through its supervised residual.
+        nn.init.zeros_(self.retrieval[-1].weight)
+        nn.init.zeros_(self.retrieval[-1].bias)
 
     def retrieval_query(self, draft_hidden: torch.Tensor) -> torch.Tensor:
         if draft_hidden.shape[-1] != self.draft_hidden_size:
