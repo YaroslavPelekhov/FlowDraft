@@ -50,6 +50,7 @@ def parse_args():
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--teacher-forcing-start", type=float, default=1.0)
     parser.add_argument("--teacher-forcing-end", type=float, default=0.1)
+    parser.add_argument("--teacher-forcing-decay-ratio", type=float, default=1.0)
     parser.add_argument("--feedback-mode", choices=("continuous", "advanced_token"), default="continuous")
     parser.add_argument("--flow-diagonal-fraction", type=float, default=0.0)
     parser.add_argument("--flow-consistency-weight", type=float, default=0.0)
@@ -151,7 +152,8 @@ def collect_teacher(model, input_ids: torch.Tensor, num_blocks: int) -> dict:
 
 
 def teacher_forcing_ratio(args, step: int) -> float:
-    progress = (step - 1) / max(args.max_steps - 1, 1)
+    decay_steps = max(1, int(args.max_steps * args.teacher_forcing_decay_ratio))
+    progress = min((step - 1) / max(decay_steps - 1, 1), 1.0)
     return args.teacher_forcing_start + progress * (args.teacher_forcing_end - args.teacher_forcing_start)
 
 
@@ -214,6 +216,8 @@ def main() -> None:
         raise ValueError("flow_diagonal_fraction must be in [0, 1]")
     if not 0.0 <= args.flow_time_min < 1.0:
         raise ValueError("flow_time_min must be in [0, 1)")
+    if not 0.0 < args.teacher_forcing_decay_ratio <= 1.0:
+        raise ValueError("teacher_forcing_decay_ratio must be in (0, 1]")
     set_seed(args.seed)
     output_dir = Path(args.output_dir)
     allowed_existing_files = {"run.log", "supervisor.log", "supervisor.err.log"}

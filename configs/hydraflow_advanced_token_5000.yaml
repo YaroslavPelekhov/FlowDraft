@@ -16,6 +16,7 @@ num_layers: 4
 dropout: 0.0
 teacher_forcing_start: 1.0
 teacher_forcing_end: 0.0
+teacher_forcing_decay_ratio: 0.24
 feedback_mode: advanced_token
 flow_diagonal_fraction: 0.25
 flow_diagonal_loss_weight: 0.10

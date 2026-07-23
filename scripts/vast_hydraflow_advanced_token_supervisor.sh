@@ -4,7 +4,7 @@ set -euo pipefail
 source /opt/supervisor-scripts/utils/environment.sh
 cd /workspace/FlowDraft-cfmproper
 
-export OUT_DIR="${OUT_DIR:-/workspace/flowdraft_runs/hydraflow_advanced_token_5000_r1}"
+export OUT_DIR="${OUT_DIR:-/workspace/flowdraft_runs/hydraflow_advanced_token_5000_r2}"
 export MAX_STEPS="${MAX_STEPS:-5000}"
 
 exec bash scripts/run_vast_hydraflow_advanced_token.sh
