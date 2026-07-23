@@ -1,0 +1,13 @@
+{
+  "aggregate_speedup": 1.0489819661929827,
+  "aggregate_tpf": 1.1530054644808743,
+  "base_checkpoint": "/workspace/flowdraft_runs/flowdraft_v4_full_300/best",
+  "checkpoint": "/workspace/flowdraft_runs/simplex_flow_probe_300_r1/best",
+  "flow_steps": 2,
+  "method": "local-simplex categorical flow map",
+  "num_prompts": 10,
+  "parity_rate": 1.0,
+  "total_qwen_forward_passes": 549,
+  "total_simplex_head_calls": 270,
+  "weighted_acceptance": 1.4881889763779528
+}
