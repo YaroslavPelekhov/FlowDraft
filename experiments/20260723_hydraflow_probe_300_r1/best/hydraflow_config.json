@@ -1,0 +1,14 @@
+{
+  "base_flowdraft_adapter_sha256": "68c7dbab9bdd21babf9f0617907d421b70534350819a84fd2c162a35c047dc4a",
+  "base_flowdraft_checkpoint": "/workspace/flowdraft_runs/flowdraft_v4_full_300/best",
+  "best_metric": 0.10546875,
+  "best_step": 100,
+  "block_size": 32,
+  "format": "hydraflow_latent_drafter_v1",
+  "hidden_size": 2048,
+  "inference": "continuous latent rollout, one batched lm_head, one ordinary frozen AR verifier pass",
+  "method": "self_conditioned_latent_feature_flow",
+  "num_layers": 2,
+  "objective": "prefix_survival_plus_hidden_and_embedding_endpoint_regression",
+  "state_size": 1024
+}

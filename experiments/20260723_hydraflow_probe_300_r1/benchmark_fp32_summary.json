@@ -1,0 +1,14 @@
+{
+  "aggregate_speedup": 0.6978602143826557,
+  "aggregate_target_model_tpf": 1.0783645655877343,
+  "base_checkpoint": "/workspace/flowdraft_runs/flowdraft_v4_full_300/best",
+  "checkpoint": "/workspace/flowdraft_runs/hydraflow_probe_300_r1/best",
+  "dtype": "fp32",
+  "method": "HydraFlow self-conditioned latent feature drafter",
+  "num_prompts": 10,
+  "p50_acceptance": 0.0,
+  "parity_rate": 1.0,
+  "total_hydraflow_head_calls": 577,
+  "total_target_model_forward_passes": 587,
+  "weighted_acceptance": 0.0831889081455806
+}
