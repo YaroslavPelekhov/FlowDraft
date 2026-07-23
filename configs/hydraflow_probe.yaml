@@ -1,0 +1,27 @@
+# HydraFlow: sequential latent trajectory with a single batched vocabulary
+# projection and exactly one frozen-Qwen verifier per speculative cycle.
+max_steps: 300
+batch_size: 1
+num_anchor_blocks: 32
+learning_rate: 2.0e-4
+warmup_ratio: 0.08
+weight_decay: 0.01
+max_grad_norm: 1.0
+hidden_loss_weight: 0.25
+embedding_loss_weight: 0.25
+prefix_loss_weight: 1.0
+prefix_weight_decay: 0.9
+state_size: 1024
+num_layers: 2
+dropout: 0.0
+teacher_forcing_start: 1.0
+teacher_forcing_end: 0.1
+dtype: bf16
+attn_implementation: eager
+eval_every: 50
+eval_batches: 8
+eval_anchor_blocks: 32
+early_stopping_patience: 3
+seed: 71
+num_workers: 2
+log_every: 10

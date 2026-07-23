@@ -15,6 +15,7 @@ from orthrus_training.flowdraft import (
 from orthrus_training.modeling import FlowDraftStateAdapter
 from orthrus_training.residual_flow import ResidualFlowCorrector, verifier_margin
 from orthrus_training.cacheflow import CacheFlowTrajectoryHead, flow_source_from_context
+from orthrus_training.hydraflow import HydraFlowDrafter
 from orthrus_training.flowtree import (
     ancestor_matrix,
     build_flowtree,
@@ -318,3 +319,17 @@ def test_cacheflow_endpoint_shape_is_block_parallel_and_finite():
 
     assert endpoint.shape == (2, 3, 4, 8)
     assert torch.isfinite(endpoint).all()
+
+
+def test_hydraflow_self_conditioned_rollout_has_a_correlated_trajectory():
+    head = HydraFlowDrafter(hidden_size=8, block_size=5, state_size=16, num_layers=1)
+    context = torch.randn((2, 3, 8))
+    anchor = torch.randn((2, 3, 8))
+    teacher = torch.randn((2, 3, 4, 8))
+
+    free_hidden, free_embeddings = head.rollout(context, anchor)
+    forced_hidden, forced_embeddings = head.rollout(context, anchor, teacher, teacher_forcing_ratio=1.0)
+
+    assert free_hidden.shape == forced_hidden.shape == (2, 3, 4, 8)
+    assert free_embeddings.shape == forced_embeddings.shape == (2, 3, 4, 8)
+    assert not torch.allclose(free_hidden[:, :, 1:], forced_hidden[:, :, 1:])
