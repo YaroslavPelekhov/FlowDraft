@@ -1,0 +1,11 @@
+{
+  "best_eval_loss": 5.696515336632729,
+  "best_metric": "eval_greedy_prefix_acceptance",
+  "best_metric_value": 0.681640625,
+  "best_step": 100,
+  "early_stopping_patience": 4,
+  "evaluations_without_improvement": 0,
+  "last_step": 100,
+  "method": "flowdraft_categorical_flow_map",
+  "stopped_early": false
+}

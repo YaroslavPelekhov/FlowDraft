@@ -1,0 +1,47 @@
+{
+  "created_at_utc": "2026-07-23T03:38:26.714860+00:00",
+  "files": [
+    {
+      "bytes": 6755,
+      "path": "benchmark_best_flow1_metrics.jsonl",
+      "sha256": "24c0af2100187aa23216d81d5ee6a955bdfbc998b97728c5e867614fa12f1b1a"
+    },
+    {
+      "bytes": 1667,
+      "path": "benchmark_best_flow1_summary.json",
+      "sha256": "073e6111fb6aedb1c353248e2fc115e75af3374693d0bc40858508f64fde73b3"
+    },
+    {
+      "bytes": 426,
+      "path": "best_metrics.json",
+      "sha256": "38a64102ab0c98991db19be8483e31eae207122fc4e8ca7a1406d83721702504"
+    },
+    {
+      "bytes": 312,
+      "path": "last_metrics.json",
+      "sha256": "08c987eb361c3bb79e4abd440e4a6b34020f74180e44c3c3935720fe9663c467"
+    },
+    {
+      "bytes": 2443,
+      "path": "run_config.json",
+      "sha256": "6c90ab49757ac11fd2cc56b6a184eef71a29c1e2e6c01e22c9e1810d9ee8d44c"
+    },
+    {
+      "bytes": 5685,
+      "path": "run_manifest.json",
+      "sha256": "cb9637acbb84ef6273d5ecf3822ca67e2539761f59396be457c38e85bede2ed3"
+    },
+    {
+      "bytes": 10030,
+      "path": "train_metrics.jsonl",
+      "sha256": "a95c726da70d032fbb189d72e09992fbd796c60d4506e134b7b46e286fb41711"
+    }
+  ],
+  "git": {
+    "branch": "main",
+    "commit": "0069ae63790a8bc7d40182bcc094f9802cd79b5b",
+    "status": "?? experiments/\n?? paper/\n?? tmp/"
+  },
+  "record_id": "20260723_cfm_v2_balanced_pilot100",
+  "source_dir_name": "cfm_v2_balanced_pilot100_20260723T025900Z"
+}
