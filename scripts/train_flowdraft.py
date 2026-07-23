@@ -493,7 +493,10 @@ def evaluate_distillation(
     source_seed: int,
 ) -> dict[str, float]:
     was_training = model.training
-    model.eval()
+    # The upstream Orthrus implementation selects the independent diffusion
+    # block mask through its training flag. Qwen has no active dropout in this
+    # path, so evaluation must retain train mode and disable gradients instead.
+    model.train()
     losses = []
     hard_ce_losses = []
     prefix_losses = []
@@ -559,8 +562,8 @@ def evaluate_distillation(
         greedy_prefix_acceptances.append(float(prefix_metrics["greedy_prefix_acceptance"].cpu()))
         prefix_expected_acceptances.append(float(prefix_metrics["prefix_expected_acceptance"].cpu()))
 
-    if was_training:
-        model.train()
+    if not was_training:
+        model.eval()
 
     return {
         "eval_loss": sum(losses) / len(losses) if losses else float("inf"),

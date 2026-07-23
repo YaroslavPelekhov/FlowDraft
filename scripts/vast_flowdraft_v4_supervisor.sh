@@ -8,7 +8,7 @@ cd /workspace/FlowDraft
 export PYTHON_BIN=/workspace/flowdraft_venv/bin/python
 export TRAIN_MANIFEST=/workspace/flowdraft_data/nemotron_50k/manifest.json
 export EVAL_MANIFEST=/workspace/flowdraft_data/nemotron_50k_holdout/manifest.json
-export OUT_DIR="${OUT_DIR:-/workspace/flowdraft_runs/flowdraft_v4_diagnostic_80_r2}"
+export OUT_DIR="${OUT_DIR:-/workspace/flowdraft_runs/flowdraft_v4_diagnostic_80_r3}"
 export MAX_STEPS="${MAX_STEPS:-80}"
 export NUM_ANCHOR_BLOCKS="${NUM_ANCHOR_BLOCKS:-32}"
 export GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-16}"
