@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import signal
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -259,6 +260,15 @@ def main() -> None:
     write_json(output_dir / "run_manifest.json", {"status": "running", "run_config": run_config, "torch": torch.__version__, "gpu": torch.cuda.get_device_name(0)})
     print(f"hydraflow trainable={sum(item.numel() for item in head.parameters()):,} train_unique={train_unique} eval_unique={eval_unique}", flush=True)
     best_metric, best_step, stale, step = float("-inf"), None, 0, 0
+    stop_requested = False
+
+    def request_stop(signum, _frame) -> None:
+        nonlocal stop_requested
+        stop_requested = True
+        print(f"HYDRAFLOW_STOP_REQUESTED signal={signum}; finishing the current optimizer step", flush=True)
+
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
     metrics_file = (output_dir / "train_metrics.jsonl").open("w", encoding="utf-8")
     progress = tqdm(total=args.max_steps, desc="hydraflow optimizer steps")
     try:
@@ -321,13 +331,16 @@ def main() -> None:
                     break
             if step >= args.max_steps:
                 break
+            if stop_requested:
+                break
     finally:
         progress.close(); metrics_file.close()
     save_checkpoint(head, output_dir / "last", checkpoint_config | {"last_step": step})
     write_json(output_dir / "best_metrics.json", {"best_step": best_step, "best_metric": best_metric})
     write_json(output_dir / "last_metrics.json", {"last_step": step})
-    write_json(output_dir / "run_manifest.json", {"status": "completed", "best_step": best_step, "best_metric": best_metric, "completed_at_utc": datetime.now(timezone.utc).isoformat(), "run_config": run_config})
-    print(f"HYDRAFLOW_COMPLETE best_step={best_step} best_metric={best_metric:.6f}", flush=True)
+    status = "interrupted" if stop_requested else "completed"
+    write_json(output_dir / "run_manifest.json", {"status": status, "best_step": best_step, "best_metric": best_metric, "completed_at_utc": datetime.now(timezone.utc).isoformat(), "run_config": run_config})
+    print(f"HYDRAFLOW_COMPLETE status={status} best_step={best_step} best_metric={best_metric:.6f}", flush=True)
 
 
 if __name__ == "__main__":
