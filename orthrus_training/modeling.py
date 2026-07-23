@@ -271,10 +271,33 @@ def flowtree_verifier_logits(
 
     if tree_token_ids.dim() != 2 or tree_token_ids.shape[0] != 1:
         raise ValueError("FlowTree verifier currently supports one request at a time")
+    if causal_limit.shape != tree_token_ids.shape:
+        raise ValueError("causal_limit must have the same shape as tree_token_ids")
+    if visibility.shape[0] != tree_token_ids.shape[1]:
+        raise ValueError("visibility does not match the number of tree nodes")
+    # FlexAttention on the pinned torch runtime is reliable for Orthrus's
+    # rectangular blocks but not arbitrary tree sparsity. A FlowTree is small,
+    # so use an explicit eager mask: it is exact, inspectable, and costs less
+    # than a megabyte for the v1 tree budget.
+    batch_size, tree_nodes = tree_token_ids.shape
+    mask_value = torch.finfo(model.dtype).min
+    attention_mask = torch.full(
+        (batch_size, 1, tree_nodes, ar_seq_len + tree_nodes),
+        mask_value,
+        dtype=model.dtype,
+        device=tree_token_ids.device,
+    )
+    for query in range(tree_nodes):
+        ar_stop = int(causal_limit[0, query]) + 1
+        attention_mask[:, :, query, :ar_stop] = 0
+    attention_mask[..., ar_seq_len:] = torch.where(
+        visibility.view(1, 1, tree_nodes, tree_nodes),
+        torch.zeros((), dtype=model.dtype, device=tree_token_ids.device),
+        torch.full((), mask_value, dtype=model.dtype, device=tree_token_ids.device),
+    )
+
     was_training = model.training
-    # Orthrus creates its FlexAttention mask only in train mode. Its Qwen path
-    # has no dropout, and this call stays under no_grad.
-    model.train()
+    model.eval()
     try:
         with flowtree_ar_verifier_mode(model, visibility):
             outputs = model(
@@ -283,6 +306,7 @@ def flowtree_verifier_logits(
                 past_key_values=past_key_values,
                 use_cache=False,
                 is_diffusion_pass=True,
+                attention_mask=attention_mask,
                 causal_limit=causal_limit,
                 ar_seq_len=ar_seq_len,
             )
