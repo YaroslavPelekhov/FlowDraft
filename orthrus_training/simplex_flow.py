@@ -211,7 +211,9 @@ class DynamicSupportSimplexFlowRefiner(nn.Module):
     def retrieval_query(self, draft_hidden: torch.Tensor) -> torch.Tensor:
         if draft_hidden.shape[-1] != self.draft_hidden_size:
             raise ValueError("draft_hidden has the wrong feature dimension")
-        return torch.nn.functional.normalize(self.retrieval(draft_hidden.float()), dim=-1)
+        module_dtype = self.retrieval[1].weight.dtype
+        query = self.retrieval(draft_hidden.to(dtype=module_dtype))
+        return torch.nn.functional.normalize(query.float(), dim=-1)
 
     def retrieval_scores(self, draft_hidden: torch.Tensor, token_codebook: torch.Tensor) -> torch.Tensor:
         if token_codebook.shape[-1] != self.token_code_dim:
