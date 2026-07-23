@@ -337,8 +337,13 @@ def main() -> None:
         raise RuntimeError("R2Flow training requires CUDA")
     set_seed(args.seed)
     output_dir = Path(args.output_dir)
-    if output_dir.exists() and any(output_dir.iterdir()):
-        raise FileExistsError(f"Refusing to overwrite non-empty output directory: {output_dir}")
+    if output_dir.exists():
+        existing = {path.name for path in output_dir.iterdir()}
+        # The launcher opens its durable stdout log before invoking Python.  It
+        # is safe to retain that single file; any training artifact means this
+        # is a real prior run and must never be overwritten.
+        if existing - {"run.log"}:
+            raise FileExistsError(f"Refusing to overwrite non-empty output directory: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     train_unique, eval_unique = assert_disjoint_packed_manifests(args.train_manifest, args.eval_manifest)
     dtype = dtype_from_string(args.dtype)
