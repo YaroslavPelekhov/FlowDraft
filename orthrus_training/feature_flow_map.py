@@ -110,7 +110,9 @@ class FeatureFlowMapHead(nn.Module):
         if time.shape != context_hidden.shape[:2]:
             raise ValueError("time must match [batch, anchors]")
         condition = self.condition_proj(torch.cat([context_hidden, anchor_embeddings], dim=-1)).unsqueeze(2)
-        time_features = self.time_proj(_time_features(time, self.latent_size)).unsqueeze(2)
+        # Fourier phases are accumulated in FP32 for numerical stability, but
+        # the learned projection follows the head's BF16/FP32 execution dtype.
+        time_features = self.time_proj(_time_features(time, self.latent_size).to(dtype=state.dtype)).unsqueeze(2)
         states = self.state_proj(state) + condition + time_features + self.position
         batch, anchors = context_hidden.shape[:2]
         states = states.reshape(batch * anchors, self.prediction_length, self.latent_size)
