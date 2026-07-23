@@ -1,0 +1,13 @@
+{
+  "aggregate_speedup": 1.0662734704582273,
+  "aggregate_tpf": 1.1700554528650646,
+  "base_checkpoint": "/workspace/flowdraft_runs/flowdraft_v4_full_300/best",
+  "checkpoint": "/workspace/flowdraft_runs/r2flow_probe_100_r1/best",
+  "dtype": "fp32",
+  "method": "R2Flow residual-refined categorical flow draft",
+  "num_prompts": 10,
+  "p50_final_acceptance": 2.0,
+  "parity_rate": 1.0,
+  "total_r2flow_forward_passes": 541,
+  "weighted_final_acceptance": 1.9259259259259258
+}
