@@ -104,6 +104,12 @@ def parse_args():
     parser.add_argument("--flow-state-adapter", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--flow-adapter-bottleneck", type=int, default=256)
     parser.add_argument("--one-jump-fraction", type=float, default=0.0)
+    parser.add_argument(
+        "--direct-endpoint-teacher-weight",
+        type=float,
+        default=1.0,
+        help="Weight for frozen-AR KL on exact CFM (0 -> 1) proposal states.",
+    )
     parser.add_argument("--ecld-time-weight", choices=["uniform", "paper_clamped"], default="uniform")
     parser.add_argument("--temporal-difference-epsilon", type=float, default=0.02)
     parser.add_argument("--temporal-drift-weight", type=float, default=1.0)
@@ -263,6 +269,11 @@ def flowdraft_forward(
         ar_seq_len=input_ids.shape[1],
     )
     student_logits = select_endpoint_logits(diff_outputs.logits, block_size)
+    one_jump_mask = (
+        ~diagonal_mask
+        & torch.isclose(source_time.squeeze(-1).squeeze(-1), torch.zeros((), device=device))
+        & torch.isclose(target_time.squeeze(-1).squeeze(-1), torch.ones((), device=device))
+    ) if flow_objective == "ecld" else torch.zeros_like(diagonal_mask)
     return {
         "student_logits": student_logits,
         "teacher_logits": teacher_logits,
@@ -274,6 +285,7 @@ def flowdraft_forward(
         "source_time": source_time,
         "target_time": target_time,
         "diagonal_mask": diagonal_mask,
+        "one_jump_mask": one_jump_mask,
     }
 
 
@@ -301,6 +313,7 @@ def ecld_consistency_loss(
     source_time: torch.Tensor,
     target_time: torch.Tensor,
     diagonal_mask: torch.Tensor,
+    one_jump_mask: torch.Tensor,
     endpoint_topk: int,
     endpoint_transport: str,
     endpoint_vocab_chunk_size: int,
@@ -315,7 +328,10 @@ def ecld_consistency_loss(
     not support a full-model JVP on the target hardware.
     """
 
-    off_diagonal = ~diagonal_mask
+    # Exact (0 -> 1) blocks are supervised directly by the frozen AR teacher.
+    # Applying the temporal ECLD weight at t=1 would create a boundary
+    # singularity and drown out the proposal objective.
+    off_diagonal = ~diagonal_mask & ~one_jump_mask
     if not torch.any(off_diagonal):
         zero = first_logits.new_zeros(())
         return zero, zero, zero
@@ -750,6 +766,7 @@ def main() -> None:
     global_step = 0
     running_loss = 0.0
     running_ce_loss = 0.0
+    running_direct_teacher_kl = 0.0
     running_hard_ce_loss = 0.0
     running_prefix_loss = 0.0
     running_prefix_kl_loss = 0.0
@@ -841,6 +858,41 @@ def main() -> None:
                         weights=prefix_weights,
                         reduction=args.kl_reduction,
                     )
+                direct_teacher_kl = torch.zeros((), device=device)
+                direct_prefix_loss = torch.zeros((), device=device)
+                direct_top1 = torch.zeros((), device=device)
+                direct_prefix_metrics = {
+                    "first_token_acc": torch.zeros((), device=device),
+                    "first_token_ce": torch.zeros((), device=device),
+                    "greedy_prefix_acceptance": torch.zeros((), device=device),
+                    "prefix_expected_acceptance": torch.zeros((), device=device),
+                }
+                if args.flow_objective == "ecld" and torch.any(out["one_jump_mask"]):
+                    direct_logits = select_block_values(
+                        out["student_logits"], out["one_jump_mask"], args.block_size - 1
+                    ).reshape(input_ids.shape[0], -1, out["student_logits"].shape[-1])
+                    direct_teacher = select_block_values(
+                        out["teacher_logits"], out["one_jump_mask"], args.block_size - 1
+                    ).reshape_as(direct_logits)
+                    direct_targets = select_block_values(
+                        out["target_ids"], out["one_jump_mask"], args.block_size - 1
+                    ).reshape(input_ids.shape[0], -1)
+                    direct_teacher_kl = forward_kl_distillation(
+                        direct_logits,
+                        direct_teacher,
+                        temperature=args.temperature,
+                        reduction=args.kl_reduction,
+                    )
+                    direct_prefix_loss = prefix_survival_cross_entropy(
+                        direct_logits,
+                        direct_targets,
+                        block_size=args.block_size,
+                        decay=args.prefix_weight_decay,
+                    )
+                    direct_top1 = token_accuracy(direct_logits.detach(), direct_targets)
+                    direct_prefix_metrics = prefix_acceptance_metrics(
+                        direct_logits.detach(), direct_targets, args.block_size
+                    )
                 consistency = torch.zeros((), device=device)
                 endpoint_consistency = torch.zeros((), device=device)
                 temporal_drift = torch.zeros((), device=device)
@@ -863,6 +915,7 @@ def main() -> None:
                         source_time=out["source_time"],
                         target_time=out["target_time"],
                         diagonal_mask=out["diagonal_mask"],
+                        one_jump_mask=out["one_jump_mask"],
                         endpoint_topk=args.endpoint_topk,
                         endpoint_transport=args.endpoint_transport,
                         endpoint_vocab_chunk_size=args.endpoint_vocab_chunk_size,
@@ -872,8 +925,9 @@ def main() -> None:
                     )
                 loss = (
                     ce_loss
+                    + args.direct_endpoint_teacher_weight * direct_teacher_kl
                     + args.hard_ce_weight * hard_ce_loss
-                    + args.prefix_loss_weight * prefix_loss
+                    + args.prefix_loss_weight * direct_prefix_loss
                     + args.prefix_kl_weight * prefix_kl_loss
                     + args.consistency_weight
                     * (4.0 * endpoint_consistency + 2.0 * args.temporal_drift_weight * temporal_drift)
@@ -882,20 +936,24 @@ def main() -> None:
 
                 running_loss += float(loss.detach().cpu())
                 running_ce_loss += float(ce_loss.detach().cpu())
+                running_direct_teacher_kl += float(direct_teacher_kl.detach().cpu())
                 running_hard_ce_loss += float(hard_ce_loss.detach().cpu())
-                running_prefix_loss += float(prefix_loss.detach().cpu())
+                running_prefix_loss += float(direct_prefix_loss.detach().cpu())
                 running_prefix_kl_loss += float(prefix_kl_loss.detach().cpu())
                 running_consistency_loss += float(consistency.detach().cpu())
                 running_endpoint_consistency += float(endpoint_consistency.detach().cpu())
                 running_temporal_drift += float(temporal_drift.detach().cpu())
-                running_acc += float(token_accuracy(supervised_logits.detach(), supervised_targets).cpu())
-                prefix_metrics = prefix_acceptance_metrics(
+                reported_top1 = direct_top1 if args.flow_objective == "ecld" else token_accuracy(
+                    supervised_logits.detach(), supervised_targets
+                )
+                reported_prefix_metrics = direct_prefix_metrics if args.flow_objective == "ecld" else prefix_acceptance_metrics(
                     supervised_logits.detach(), supervised_targets, args.block_size
                 )
-                running_first_acc += float(prefix_metrics["first_token_acc"].cpu())
-                running_first_ce += float(prefix_metrics["first_token_ce"].cpu())
-                running_greedy_prefix_acceptance += float(prefix_metrics["greedy_prefix_acceptance"].cpu())
-                running_prefix_expected_acceptance += float(prefix_metrics["prefix_expected_acceptance"].cpu())
+                running_acc += float(reported_top1.cpu())
+                running_first_acc += float(reported_prefix_metrics["first_token_acc"].cpu())
+                running_first_ce += float(reported_prefix_metrics["first_token_ce"].cpu())
+                running_greedy_prefix_acceptance += float(reported_prefix_metrics["greedy_prefix_acceptance"].cpu())
+                running_prefix_expected_acceptance += float(reported_prefix_metrics["prefix_expected_acceptance"].cpu())
 
                 if (micro_step + 1) % args.gradient_accumulation_steps == 0:
                     torch.nn.utils.clip_grad_norm_(
@@ -912,6 +970,7 @@ def main() -> None:
                         denom = args.log_every * args.gradient_accumulation_steps
                         avg_loss = running_loss / denom
                         avg_ce = running_ce_loss / denom
+                        avg_direct_teacher_kl = running_direct_teacher_kl / denom
                         avg_hard_ce = running_hard_ce_loss / denom
                         avg_prefix = running_prefix_loss / denom
                         avg_prefix_kl = running_prefix_kl_loss / denom
@@ -930,6 +989,8 @@ def main() -> None:
                             "epoch": epoch,
                             "loss": avg_loss,
                             "teacher_kl": avg_ce,
+                            "direct_endpoint_teacher_kl": avg_direct_teacher_kl,
+                            "direct_endpoint_teacher_weight": args.direct_endpoint_teacher_weight,
                             "kl_reduction": args.kl_reduction,
                             "hard_ce": avg_hard_ce,
                             "hard_ce_weight": args.hard_ce_weight,
@@ -953,6 +1014,7 @@ def main() -> None:
                         }
                         print(
                             f"step={global_step} loss={avg_loss:.5f} teacher_kl={avg_ce:.5f} "
+                            f"direct_kl={avg_direct_teacher_kl:.5f} "
                             f"hard_ce={avg_hard_ce:.5f} prefix_ce={avg_prefix:.5f} "
                             f"prefix_kl={avg_prefix_kl:.5f} consistency={avg_consistency:.5f} "
                             f"endpoint_ce={avg_endpoint_consistency:.5f} drift={avg_temporal_drift:.5f} "
@@ -965,6 +1027,7 @@ def main() -> None:
                         metrics_file.flush()
                         running_loss = 0.0
                         running_ce_loss = 0.0
+                        running_direct_teacher_kl = 0.0
                         running_hard_ce_loss = 0.0
                         running_prefix_loss = 0.0
                         running_prefix_kl_loss = 0.0
