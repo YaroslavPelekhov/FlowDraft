@@ -1,5 +1,6 @@
 # Faithful CFM adaptation on top of the frozen Orthrus AR teacher.
-# Paths and max_steps are deliberately supplied by the launcher.
+# Paths are supplied by the launcher. The 600-step cap protects against the
+# observed late-run degradation; holdout early stopping normally ends earlier.
 upstream_dir: upstream_orthrus
 base_model: Qwen/Qwen3-1.7B
 block_size: 32
@@ -37,14 +38,16 @@ hard_ce_weight: 0.0
 prefix_loss_weight: 0.0
 prefix_kl_weight: 0.0
 consistency_weight: 0.0025
-consistency_start_step: 500
+consistency_start_step: 0
 
-eval_every: 250
+max_steps: 600
+eval_every: 50
 eval_batches: 64
 eval_anchor_blocks: 8
 eval_seed: 1701
 best_metric: eval_greedy_prefix_acceptance
-save_every: 250
+early_stopping_patience: 4
+save_every: 50
 checkpoint_format: trainable
 save_trainer_state: false
 allow_missing_init_trainables: true

@@ -121,6 +121,15 @@ def parse_args():
     parser.add_argument("--eval-anchor-blocks", type=int, default=8)
     parser.add_argument("--eval-seed", type=int, default=1701)
     parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=0,
+        help=(
+            "Stop after this many consecutive holdout evaluations without an improvement "
+            "in --best-metric. Set to 0 to disable early stopping."
+        ),
+    )
+    parser.add_argument(
         "--best-metric",
         choices=["eval_greedy_prefix_acceptance", "eval_prefix_expected_acceptance", "eval_loss"],
         default="eval_greedy_prefix_acceptance",
@@ -756,6 +765,8 @@ def main() -> None:
     best_metric_value = float("inf") if args.best_metric == "eval_loss" else float("-inf")
     best_step = None
     best_eval_top1 = None
+    evaluations_without_improvement = 0
+    stopped_early = False
     started_at = time.perf_counter()
     metrics_file = (output_dir / "train_metrics.jsonl").open("a", encoding="utf-8")
     optimizer.zero_grad(set_to_none=True)
@@ -1003,6 +1014,7 @@ def main() -> None:
                             else candidate_value > best_metric_value
                         )
                         if improved:
+                            evaluations_without_improvement = 0
                             best_metric_value = candidate_value
                             best_eval_loss = eval_record["eval_loss"]
                             best_step = global_step
@@ -1027,6 +1039,31 @@ def main() -> None:
                                     "method": metadata["method"],
                                 },
                             )
+                        else:
+                            evaluations_without_improvement += 1
+
+                        if (
+                            args.early_stopping_patience > 0
+                            and evaluations_without_improvement >= args.early_stopping_patience
+                        ):
+                            stopped_early = True
+                            early_stop_record = {
+                                "step": global_step,
+                                "epoch": epoch,
+                                "kind": "early_stop",
+                                "best_step": best_step,
+                                "best_metric": args.best_metric,
+                                "best_metric_value": best_metric_value,
+                                "evaluations_without_improvement": evaluations_without_improvement,
+                                "early_stopping_patience": args.early_stopping_patience,
+                            }
+                            print(
+                                f"early stopping at step={global_step}: no {args.best_metric} improvement "
+                                f"for {evaluations_without_improvement} holdout evaluations; "
+                                f"best_step={best_step}"
+                            )
+                            metrics_file.write(json.dumps(early_stop_record, sort_keys=True) + "\n")
+                            metrics_file.flush()
 
                     if args.save_every > 0 and global_step % args.save_every == 0:
                         last_dir = output_dir / "last"
@@ -1045,13 +1082,13 @@ def main() -> None:
                         if args.save_trainer_state:
                             save_training_state(last_dir, optimizer, scheduler, global_step, epoch)
 
-                    if global_step >= total_steps:
+                    if stopped_early or global_step >= total_steps:
                         break
 
-                if global_step >= total_steps:
+                if stopped_early or global_step >= total_steps:
                     break
 
-            if global_step >= total_steps:
+            if stopped_early or global_step >= total_steps:
                 break
 
         progress.close()
@@ -1066,6 +1103,9 @@ def main() -> None:
                     "best_metric_value": best_metric_value if best_step is not None else None,
                     "best_eval_loss": best_eval_loss if best_step is not None else None,
                     "method": "flowdraft_categorical_flow_map",
+                    "stopped_early": stopped_early,
+                    "early_stopping_patience": args.early_stopping_patience,
+                    "evaluations_without_improvement": evaluations_without_improvement,
                 },
             )
             if args.save_trainer_state:
@@ -1077,6 +1117,9 @@ def main() -> None:
                 "completed_at_utc": datetime.now(timezone.utc).isoformat(),
                 "global_step": global_step,
                 "best_step": best_step,
+                "stopped_early": stopped_early,
+                "early_stopping_patience": args.early_stopping_patience,
+                "evaluations_without_improvement": evaluations_without_improvement,
             }
         )
         write_json(output_dir / "run_manifest.json", manifest)
