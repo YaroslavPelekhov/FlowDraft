@@ -25,6 +25,7 @@ MAX_STEPS="${MAX_STEPS:-300}"
 CONFIG_PATH="${CONFIG_PATH:-configs/eagleflow_attention_screen_300.yaml}"
 HF_REPO_ID="${HF_REPO_ID:-}"
 HF_RUN_PATH="${HF_RUN_PATH:-}"
+HEAD_INIT="${HEAD_INIT:-}"
 
 if [ -e "$OUT_DIR" ]; then
   existing_entries="$(find "$OUT_DIR" -mindepth 1 -maxdepth 1 -printf '%f\n' | grep -vxE '(run.log|supervisor.log|supervisor.err.log)' || true)"
@@ -43,13 +44,18 @@ exec > >(tee -a "$OUT_DIR/run.log") 2>&1
 log "EagleFlow resource preflight"
 "$PYTHON_BIN" scripts/inspect_resources.py --paths / /workspace /dev/shm
 log "Training attention-conditioned endpoint Flow Map"
-"$PYTHON_BIN" scripts/train_eagleflow.py \
+TRAIN_ARGS=(
   --config "$CONFIG_PATH" \
   --init-checkpoint "$INIT_CHECKPOINT" \
   --train-manifest "$TRAIN_MANIFEST" \
   --eval-manifest "$EVAL_MANIFEST" \
   --output-dir "$OUT_DIR" \
   --max-steps "$MAX_STEPS"
+)
+if [ -n "$HEAD_INIT" ]; then
+  TRAIN_ARGS+=(--init-head "$HEAD_INIT")
+fi
+"$PYTHON_BIN" scripts/train_eagleflow.py "${TRAIN_ARGS[@]}"
 
 CHECKPOINT="$OUT_DIR/best"
 if [ ! -f "$CHECKPOINT/eagleflow_head.safetensors" ]; then

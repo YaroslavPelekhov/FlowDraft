@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import get_cosine_schedule_with_warmup, set_seed
@@ -39,6 +39,7 @@ def parse_args():
     parser.add_argument("--config")
     parser.add_argument("--upstream-dir", default="upstream_orthrus")
     parser.add_argument("--init-checkpoint", required=True)
+    parser.add_argument("--init-head", default=None, help="Optional compatible EagleFlow head used to warm-start training.")
     parser.add_argument("--train-manifest", required=True)
     parser.add_argument("--eval-manifest", required=True)
     parser.add_argument("--output-dir", required=True)
@@ -195,6 +196,13 @@ def main() -> None:
         int(model.config.hidden_size), int(model.config.block_size), args.state_size,
         args.num_layers, args.num_heads, args.dropout,
     ).to(device="cuda", dtype=dtype).train()
+    if args.init_head:
+        init_head = Path(args.init_head)
+        with (init_head / "eagleflow_config.json").open("r", encoding="utf-8") as handle:
+            init_config = json.load(handle)
+        if init_config.get("drafter_mode", "sequential") != args.drafter_mode:
+            raise ValueError("init-head drafter_mode does not match the requested architecture")
+        head.load_state_dict(load_file(init_head / "eagleflow_head.safetensors"), strict=True)
     optimizer = torch.optim.AdamW(head.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     scheduler = get_cosine_schedule_with_warmup(optimizer, max(1, int(args.max_steps * args.warmup_ratio)), args.max_steps)
     optimizer.zero_grad(set_to_none=True)
@@ -206,6 +214,7 @@ def main() -> None:
         "objective": "prefix_survival_plus_eagle_feature_token_trajectory_plus_endpoint_flow_consistency",
         "base_flowdraft_checkpoint": str(Path(args.init_checkpoint).resolve()),
         "base_flowdraft_adapter_sha256": sha256_file(Path(args.init_checkpoint) / "adapter_model.safetensors"),
+        "warm_started_from": str(Path(args.init_head).resolve()) if args.init_head else None,
         "block_size": head.block_size, "hidden_size": head.hidden_size, "state_size": head.state_size,
         "num_layers": head.num_layers, "num_heads": head.num_heads, "drafter_mode": args.drafter_mode,
         "feedback_mode": args.feedback_mode,
