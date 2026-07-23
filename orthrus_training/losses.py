@@ -145,3 +145,132 @@ def prefix_acceptance_metrics(
 def token_accuracy(student_logits: torch.Tensor, target_ids: torch.Tensor) -> torch.Tensor:
     preds = student_logits.argmax(dim=-1)
     return (preds == target_ids).float().mean()
+
+
+def bounded_jsd_distillation(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    temperature: float = 1.0,
+    weights: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Bounded Jensen-Shannon distillation for semigroup consistency."""
+
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
+    student_log = F.log_softmax(student_logits.float() / temperature, dim=-1)
+    teacher_log = F.log_softmax(teacher_logits.detach().float() / temperature, dim=-1)
+    student_prob = student_log.exp()
+    teacher_prob = teacher_log.exp()
+    mixture_log = torch.logaddexp(student_log, teacher_log) - torch.log(
+        torch.tensor(2.0, device=student_logits.device)
+    )
+    per_token = 0.5 * (
+        (student_prob * (student_log - mixture_log)).sum(dim=-1)
+        + (teacher_prob * (teacher_log - mixture_log)).sum(dim=-1)
+    )
+    if weights is not None:
+        broadcast = _broadcast_position_weights(weights, per_token)
+        return (
+            per_token * broadcast
+        ).sum() / broadcast.expand_as(per_token).sum().clamp_min(1e-8) * (temperature**2)
+    return per_token.mean() * (temperature**2)
+
+
+def verifier_aligned_losses(
+    draft_logits: torch.Tensor,
+    verifier_logits: torch.Tensor,
+    block_size: int,
+    temperature: float = 1.0,
+    rejected_decay: float = 0.8,
+    reverse_kl_clip: float = 0.01,
+) -> dict[str, torch.Tensor]:
+    """Losses aligned with left-to-right speculative acceptance.
+
+    Accepted positions preserve the target distribution with forward KL. The
+    first rejected token and its suffix use clipped reverse KL, while top-1 CE
+    directly repairs the decisions that determine greedy prefix survival.
+    """
+
+    if draft_logits.shape != verifier_logits.shape:
+        raise ValueError("draft and verifier logits must have identical shapes")
+    if not 0.0 < rejected_decay <= 1.0:
+        raise ValueError("rejected_decay must be in (0, 1]")
+    if reverse_kl_clip < 0.0:
+        raise ValueError("reverse_kl_clip must be non-negative")
+
+    steps = block_size - 1
+    if draft_logits.shape[1] % steps:
+        raise ValueError("token length must be divisible by block_size - 1")
+    batch_size, _, vocab_size = draft_logits.shape
+    num_blocks = draft_logits.shape[1] // steps
+    draft = draft_logits.reshape(batch_size, num_blocks, steps, vocab_size).float()
+    verifier = verifier_logits.detach().reshape_as(draft).float()
+
+    target_ids = verifier.argmax(dim=-1)
+    draft_ids = draft.argmax(dim=-1)
+    matches = draft_ids.eq(target_ids)
+    accepted = matches.to(torch.int64).cumprod(dim=-1).bool()
+    alive_before = torch.cat(
+        [
+            torch.ones_like(accepted[:, :, :1]),
+            accepted[:, :, :-1],
+        ],
+        dim=-1,
+    )
+    first_rejected = alive_before & ~matches
+
+    draft_log = F.log_softmax(draft / temperature, dim=-1)
+    verifier_log = F.log_softmax(verifier / temperature, dim=-1)
+    draft_prob = draft_log.exp()
+    verifier_prob = verifier_log.exp()
+
+    forward_per_token = (verifier_prob * (verifier_log - draft_log)).sum(dim=-1)
+    accepted_weights = alive_before.float()
+    forward_kl = (forward_per_token * accepted_weights).sum() / accepted_weights.sum().clamp_min(1.0)
+
+    if reverse_kl_clip > 0:
+        # Mix in a small detached proposal mass instead of flooring every
+        # vocabulary entry. Per-entry flooring is almost uniform for a 150k
+        # vocabulary and destroys the verifier signal.
+        verifier_for_reverse = (
+            (1.0 - reverse_kl_clip) * verifier_prob
+            + reverse_kl_clip * draft_prob.detach()
+        )
+        verifier_reverse_log = verifier_for_reverse.clamp_min(1e-12).log()
+    else:
+        verifier_reverse_log = verifier_log
+    reverse_per_token = (draft_prob * (draft_log - verifier_reverse_log)).sum(dim=-1)
+
+    positions = torch.arange(steps, device=draft.device).view(1, 1, steps)
+    first_index = torch.where(
+        first_rejected,
+        positions,
+        torch.full_like(positions, steps),
+    ).amin(dim=-1, keepdim=True)
+    suffix_offset = positions - first_index
+    rejected_weights = torch.where(
+        suffix_offset >= 0,
+        rejected_decay ** suffix_offset.float(),
+        torch.zeros_like(suffix_offset, dtype=torch.float32),
+    )
+    rejected_weights = rejected_weights * (first_index < steps)
+    reverse_kl = (reverse_per_token * rejected_weights).sum() / rejected_weights.sum().clamp_min(1.0)
+
+    top1_per_token = F.cross_entropy(
+        draft.reshape(-1, vocab_size),
+        target_ids.reshape(-1),
+        reduction="none",
+    ).reshape(batch_size, num_blocks, steps)
+    top1_weights = alive_before.float()
+    top1_ce = (top1_per_token * top1_weights).sum() / top1_weights.sum().clamp_min(1.0)
+
+    return {
+        "forward_kl": forward_kl * (temperature**2),
+        "reverse_kl": reverse_kl * (temperature**2),
+        "top1_ce": top1_ce,
+        "target_ids": target_ids.reshape(batch_size, num_blocks * steps),
+        "accepted_mask": accepted.reshape(batch_size, num_blocks * steps),
+        "first_rejected_mask": first_rejected.reshape(batch_size, num_blocks * steps),
+        "greedy_prefix_acceptance": accepted.float().sum(dim=-1).mean(),
+        "first_token_accuracy": matches[:, :, 0].float().mean(),
+    }

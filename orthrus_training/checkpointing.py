@@ -90,6 +90,8 @@ def _write_trainable_checkpoint(
         "flowdraft_state_adapter": bool(getattr(model.config, "flowdraft_state_adapter", False)),
         "flowdraft_adapter_bottleneck": int(getattr(model.config, "flowdraft_adapter_bottleneck", 256)),
         "flowdraft_one_jump_fraction": float(getattr(model.config, "flowdraft_one_jump_fraction", 0.0)),
+        "flowdraft_source_prior": getattr(model.config, "flowdraft_source_prior", "mask"),
+        "flowdraft_source_seed": int(getattr(model.config, "flowdraft_source_seed", 17)),
         "trainable_parameter_names": sorted(trainable_state),
     }
     with (output_dir / "adapter_config.json").open("w", encoding="utf-8") as handle:

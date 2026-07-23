@@ -322,6 +322,7 @@ def make_flowdraft_inputs_embeds(
     mask_token_id: int,
     state_mix: torch.Tensor | float,
     state_token_ids: torch.Tensor | None = None,
+    source_token_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Create continuous categorical-flow states as token embeddings.
 
@@ -331,7 +332,16 @@ def make_flowdraft_inputs_embeds(
     """
 
     embed_tokens = model.model.embed_tokens
-    mask_blocks = torch.full_like(clean_blocks, mask_token_id)
+    mask_blocks = (
+        torch.full_like(clean_blocks, mask_token_id)
+        if source_token_ids is None
+        else source_token_ids
+    )
+    if mask_blocks.shape != clean_blocks.shape:
+        raise ValueError(
+            f"source_token_ids must have shape {tuple(clean_blocks.shape)}, "
+            f"got {tuple(mask_blocks.shape)}"
+        )
     endpoint_blocks = clean_blocks if state_token_ids is None else state_token_ids
 
     mask_embeds = embed_tokens(mask_blocks)
@@ -344,6 +354,57 @@ def make_flowdraft_inputs_embeds(
     mixed_embeds = torch.cat([anchor_embeds, mixed_embeds[:, :, 1:, :]], dim=2)
     batch_size, num_blocks, block_size, hidden_size = mixed_embeds.shape
     return mixed_embeds.reshape(batch_size, num_blocks * block_size, hidden_size)
+
+
+def sample_categorical_source_tokens(
+    clean_blocks: torch.Tensor,
+    vocab_size: int,
+    mask_token_id: int,
+    prior: str = "uniform",
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Sample the stochastic x_0 vertices used by the categorical flow.
+
+    A fixed mask is a degenerate source distribution and cannot represent a
+    non-trivial generative flow. Uniform one-hot vertices provide a genuine
+    stochastic simplex prior while keeping the state projection exact:
+    E(x_t)=(1-t)E(x_0)+tE(x_1).
+    """
+
+    if vocab_size <= 1:
+        raise ValueError("vocab_size must be greater than one")
+    if prior == "mask":
+        source = torch.full_like(clean_blocks, mask_token_id)
+    elif prior == "uniform":
+        source = torch.randint(
+            low=0,
+            high=vocab_size,
+            size=clean_blocks.shape,
+            device=clean_blocks.device,
+            dtype=clean_blocks.dtype,
+            generator=generator,
+        )
+    else:
+        raise ValueError(f"Unsupported categorical source prior: {prior}")
+
+    # Position zero is the AR-verified anchor, not part of the random source.
+    source[:, :, :1] = clean_blocks[:, :, :1]
+    return source
+
+
+def make_endpoint_blocks(
+    anchor_token_ids: torch.Tensor,
+    endpoint_token_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Join verified anchors and K-1 endpoint tokens into K-token blocks."""
+
+    if anchor_token_ids.dim() != 3 or anchor_token_ids.shape[-1] != 1:
+        raise ValueError("anchor_token_ids must have shape [batch, blocks, 1]")
+    if endpoint_token_ids.dim() != 3:
+        raise ValueError("endpoint_token_ids must have shape [batch, blocks, K-1]")
+    if endpoint_token_ids.shape[:2] != anchor_token_ids.shape[:2]:
+        raise ValueError("anchor and endpoint block dimensions must match")
+    return torch.cat([anchor_token_ids, endpoint_token_ids], dim=-1)
 
 
 def make_discrete_flowdraft_state(

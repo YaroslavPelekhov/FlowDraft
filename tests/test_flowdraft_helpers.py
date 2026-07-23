@@ -6,15 +6,19 @@ from orthrus_training.flowdraft import (
     flow_map_step_size,
     make_flowdraft_batch,
     make_flowdraft_inputs_embeds,
+    make_endpoint_blocks,
+    sample_categorical_source_tokens,
     sample_cfm_time_pairs,
     topk_endpoint_embeddings,
     transport_categorical_state,
 )
 from orthrus_training.modeling import FlowDraftStateAdapter
 from orthrus_training.losses import (
+    bounded_jsd_distillation,
     prefix_acceptance_metrics,
     prefix_survival_cross_entropy,
     prefix_survival_weights,
+    verifier_aligned_losses,
 )
 
 
@@ -169,3 +173,72 @@ def test_state_adapter_is_an_identity_at_initialization():
     time = torch.randn((1, 2, 8))
 
     assert torch.allclose(adapter(inputs, time, block_size=4), inputs)
+
+
+def test_uniform_categorical_source_is_stochastic_and_preserves_anchor():
+    clean = torch.tensor([[[3, 4, 5, 6], [8, 9, 10, 11]]])
+    generator = torch.Generator().manual_seed(123)
+    source = sample_categorical_source_tokens(
+        clean,
+        vocab_size=32,
+        mask_token_id=31,
+        prior="uniform",
+        generator=generator,
+    )
+
+    assert source.shape == clean.shape
+    assert torch.equal(source[:, :, 0], clean[:, :, 0])
+    assert not torch.equal(source[:, :, 1:], clean[:, :, 1:])
+
+
+def test_simplex_state_uses_sampled_source_vertex():
+    model = DummyModel()
+    clean = torch.tensor([[[3, 4, 5, 6]]])
+    source = torch.tensor([[[3, 7, 8, 9]]])
+    mix = torch.zeros((1, 1, 1, 1))
+    embeds = make_flowdraft_inputs_embeds(
+        model=model,
+        clean_blocks=clean,
+        mask_token_id=31,
+        state_mix=mix,
+        source_token_ids=source,
+    ).reshape(1, 1, 4, 8)
+
+    assert torch.allclose(embeds, model.model.embed_tokens(source))
+
+
+def test_endpoint_blocks_join_anchor_and_verifier_targets():
+    anchors = torch.tensor([[[4], [8]]])
+    targets = torch.tensor([[[10, 11, 12], [20, 21, 22]]])
+
+    blocks = make_endpoint_blocks(anchors, targets)
+
+    assert blocks.tolist() == [[[4, 10, 11, 12], [8, 20, 21, 22]]]
+
+
+def test_bounded_jsd_is_zero_for_identical_logits_and_bounded():
+    student = torch.tensor([[[2.0, 0.0, -1.0]]])
+    identical = bounded_jsd_distillation(student, student)
+    different = bounded_jsd_distillation(student, -student)
+
+    assert torch.isclose(identical, torch.tensor(0.0), atol=1e-7)
+    assert 0.0 < different < torch.log(torch.tensor(2.0))
+
+
+def test_verifier_aligned_loss_stops_acceptance_at_first_mismatch():
+    verifier = torch.full((1, 4, 5), -4.0)
+    draft = torch.full((1, 4, 5), -4.0)
+    verifier_targets = [0, 1, 2, 3]
+    draft_targets = [0, 1, 4, 3]
+    for position, target in enumerate(verifier_targets):
+        verifier[0, position, target] = 4.0
+    for position, target in enumerate(draft_targets):
+        draft[0, position, target] = 4.0
+
+    losses = verifier_aligned_losses(draft, verifier, block_size=5)
+
+    assert torch.isclose(
+        losses["greedy_prefix_acceptance"], torch.tensor(2.0)
+    )
+    assert losses["first_rejected_mask"].tolist() == [[False, False, True, False]]
+    assert torch.isfinite(losses["reverse_kl"])

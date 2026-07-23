@@ -1,0 +1,48 @@
+base_model: Qwen/Qwen3-1.7B
+block_size: 16
+mask_token_id: 151669
+source_prior: uniform
+source_seed: 2718
+
+batch_size: 1
+gradient_accumulation_steps: 8
+num_anchor_blocks: 16
+eval_anchor_blocks: 8
+epochs: 1
+max_steps: 300
+learning_rate: 5.0e-5
+warmup_ratio: 0.10
+weight_decay: 0.0
+max_grad_norm: 1.0
+dtype: bf16
+attn_implementation: sdpa
+
+temperature: 1.0
+diagonal_fraction: 0.50
+one_jump_fraction: 0.50
+flow_time_logit_mean: -0.4
+flow_time_logit_std: 1.0
+flow_time_max: 0.95
+flow_time_conditioning_scale: 0.05
+flow_state_adapter: true
+flow_adapter_bottleneck: 256
+endpoint_topk: 32
+
+endpoint_kl_weight: 1.0
+endpoint_top1_weight: 0.5
+proposal_forward_kl_weight: 1.0
+proposal_reverse_kl_weight: 0.5
+proposal_top1_weight: 1.0
+rejected_decay: 0.8
+reverse_kl_clip: 0.01
+semigroup_weight: 0.1
+semigroup_start_step: 150
+
+seed: 17
+num_workers: 2
+log_every: 5
+eval_every: 50
+eval_batches: 8
+save_every: 50
+early_stopping_patience: 4
+save_final: true

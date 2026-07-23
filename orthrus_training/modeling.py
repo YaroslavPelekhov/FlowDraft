@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable
 
@@ -81,6 +82,113 @@ def set_flowdraft_state_adapter_trainable(model: torch.nn.Module, enabled: bool)
         raise ValueError("Model has no FlowDraft state adapter")
     for parameter in model.flowdraft_state_adapter.parameters():
         parameter.requires_grad = enabled
+
+
+def _generate_causal_verifier_mask(
+    B: int,
+    H: int,
+    diffusion_length: int,
+    ar_len: int,
+    block_size: int,
+    causal_limit: torch.Tensor,
+    sparse_block_size: int = 128,
+):
+    """Block-parallel AR mask used to obtain verifier logits during training."""
+
+    upstream = sys.modules["upstream_orthrus_model"]
+
+    def verifier_mask_fn(b, h, q_idx, kv_idx):
+        is_kv_ar = kv_idx < ar_len
+        valid_ar = is_kv_ar & (kv_idx <= causal_limit[b, q_idx])
+
+        draft_kv_idx = kv_idx - ar_len
+        q_block_id = q_idx // block_size
+        kv_block_id = draft_kv_idx // block_size
+        q_offset = q_idx % block_size
+        kv_offset = draft_kv_idx % block_size
+        valid_draft = (
+            (~is_kv_ar)
+            & (q_block_id == kv_block_id)
+            & (kv_offset <= q_offset)
+        )
+        return valid_ar | valid_draft
+
+    return upstream.create_block_mask(
+        verifier_mask_fn,
+        B=B,
+        H=H,
+        Q_LEN=diffusion_length,
+        KV_LEN=ar_len + diffusion_length,
+        BLOCK_SIZE=sparse_block_size,
+    )
+
+
+@contextmanager
+def parallel_ar_verifier_mode(model: torch.nn.Module):
+    """Run the dual-pass kernel with frozen AR projections and a causal block mask.
+
+    The official Orthrus module only exposes a bidirectional diffusion pass for
+    training. This scoped adapter reuses the same shared KV cache to evaluate
+    many proposed blocks in parallel with the frozen Qwen verifier. It restores
+    every module reference before gradients are computed.
+    """
+
+    upstream = sys.modules.get("upstream_orthrus_model")
+    if upstream is None:
+        raise RuntimeError("The upstream Orthrus module has not been imported")
+
+    original_mask_builder = upstream.generate_dual_pass_mask
+    swaps: list[tuple[torch.nn.Module, str, torch.nn.Module]] = []
+    projection_pairs = (
+        ("q_proj_diff", "q_proj"),
+        ("k_proj_diff", "k_proj"),
+        ("v_proj_diff", "v_proj"),
+        ("o_proj_diff", "o_proj"),
+        ("q_norm_diff", "q_norm"),
+        ("k_norm_diff", "k_norm"),
+    )
+    try:
+        upstream.generate_dual_pass_mask = _generate_causal_verifier_mask
+        for layer in model.model.layers:
+            attention = layer.self_attn
+            for diffusion_name, ar_name in projection_pairs:
+                original = getattr(attention, diffusion_name)
+                swaps.append((attention, diffusion_name, original))
+                setattr(attention, diffusion_name, getattr(attention, ar_name))
+        yield
+    finally:
+        for module, name, original in reversed(swaps):
+            setattr(module, name, original)
+        upstream.generate_dual_pass_mask = original_mask_builder
+
+
+@torch.no_grad()
+def parallel_verifier_logits(
+    model: torch.nn.Module,
+    proposed_blocks: torch.Tensor,
+    position_ids: torch.Tensor,
+    causal_limit: torch.Tensor,
+    past_key_values,
+    ar_seq_len: int,
+) -> torch.Tensor:
+    """Evaluate K-token proposals with frozen AR QKV in one block-parallel pass."""
+
+    batch_size, num_blocks, block_size = proposed_blocks.shape
+    flat_blocks = proposed_blocks.reshape(batch_size, num_blocks * block_size)
+    with parallel_ar_verifier_mode(model):
+        outputs = model(
+            input_ids=flat_blocks,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=False,
+            is_diffusion_pass=True,
+            causal_limit=causal_limit,
+            ar_seq_len=ar_seq_len,
+        )
+    logits = outputs.logits.reshape(batch_size, num_blocks, block_size, -1)
+    return logits[:, :, : block_size - 1, :].reshape(
+        batch_size, num_blocks * (block_size - 1), -1
+    )
 
 
 def import_upstream_orthrus(upstream_dir: str | Path):
@@ -203,6 +311,8 @@ def load_flowdraft_adapter(
         "flowdraft_state_adapter",
         "flowdraft_adapter_bottleneck",
         "flowdraft_one_jump_fraction",
+        "flowdraft_source_prior",
+        "flowdraft_source_seed",
     ):
         if key in metadata:
             setattr(model.config, key, metadata[key])

@@ -44,6 +44,7 @@ from orthrus_training.flowdraft import (
     condition_flowdraft_state,
     exact_endpoint_embeddings,
     make_discrete_flowdraft_state,
+    sample_categorical_source_tokens,
     topk_endpoint_embeddings,
     transport_categorical_state,
 )
@@ -82,6 +83,15 @@ def parse_args():
     parser.add_argument("--paper-speedup-target", type=float, default=None)
     parser.add_argument("--paper-tpf-target", type=float, default=None)
     parser.add_argument("--require-parity", action="store_true")
+    parser.add_argument(
+        "--parity-margin-threshold",
+        type=float,
+        default=0.5,
+        help=(
+            "Recompute the earliest verifier decision below this top-2 logit "
+            "margin with a sequential AR step. This guards BF16 block-vs-token ties."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -171,11 +181,15 @@ def generate_flowdraft_greedy(
     max_new_tokens: int,
     eos_token_id: int | None,
     flow_steps: int,
+    parity_margin_threshold: float = 0.5,
 ):
     device = input_ids.device
     block_size = model.config.block_size
     mask_token_id = model.config.mask_token_id
     past_key_values = DynamicCache(config=model.config)
+    source_prior = str(getattr(model.config, "flowdraft_source_prior", "mask"))
+    source_seed = int(getattr(model.config, "flowdraft_source_seed", 17))
+    source_generator = torch.Generator(device=device).manual_seed(source_seed)
 
     max_length = input_ids.shape[1] + max_new_tokens
     output_ids = torch.full((1, max_length + block_size), mask_token_id, dtype=torch.long, device=device)
@@ -192,10 +206,17 @@ def generate_flowdraft_greedy(
     output_ids[:, start_idx] = next_token
     generated_count = 1
     acceptance_lengths: list[int] = []
+    verification_margins: list[list[float]] = []
 
     if eos_token_id is not None and int(next_token.item()) == int(eos_token_id):
         synchronize(device)
-        return output_ids[:, : start_idx + 1], time.perf_counter() - start, forward_passes, acceptance_lengths
+        return (
+            output_ids[:, : start_idx + 1],
+            time.perf_counter() - start,
+            forward_passes,
+            acceptance_lengths,
+            verification_margins,
+        )
 
     while generated_count < max_new_tokens and start_idx < max_length - 1:
         diff_len = min(block_size, max_length - start_idx)
@@ -216,6 +237,15 @@ def generate_flowdraft_greedy(
                         diff_len=diff_len,
                         mask_token_id=mask_token_id,
                     )
+                    if source_prior != "mask":
+                        source_blocks = state_ids.reshape(1, 1, diff_len)
+                        state_ids = sample_categorical_source_tokens(
+                            source_blocks,
+                            vocab_size=int(model.config.vocab_size),
+                            mask_token_id=mask_token_id,
+                            prior=source_prior,
+                            generator=source_generator,
+                        ).reshape(1, diff_len)
                     raw_state_embeds = model.model.embed_tokens(state_ids)
                 source_time_value = flow_index / max(1, flow_steps)
                 target_time_value = (flow_index + 1) / max(1, flow_steps)
@@ -298,9 +328,45 @@ def generate_flowdraft_greedy(
             acceptance_len = int(matches.cumprod(dim=1).sum(dim=1)[0].item())
         else:
             acceptance_len = 0
-        acceptance_lengths.append(acceptance_len)
+        top_two = ar_outputs.logits.float().topk(k=2, dim=-1).values
+        token_margins = top_two[:, :, 0] - top_two[:, :, 1]
+        sequential_next_token = None
+        candidate_margins = token_margins[0, : acceptance_len + 1]
+        if parity_margin_threshold > 0:
+            uncertain = (candidate_margins < parity_margin_threshold).nonzero()
+            if len(uncertain) > 0:
+                # Crop to immediately before the token whose logits determine
+                # the uncertain decision, then reproduce the ordinary AR call.
+                fallback_index = int(uncertain[0, 0].item())
+                acceptance_len = fallback_index
+                cache_length_before_context_token = start_idx + fallback_index
+                past_key_values.crop(cache_length_before_context_token)
+                context_token = proposed_block[:, fallback_index : fallback_index + 1]
+                context_position = torch.tensor(
+                    [[start_idx + fallback_index]], device=device
+                )
+                sequential_outputs = model(
+                    input_ids=context_token,
+                    position_ids=context_position,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                    is_diffusion_pass=False,
+                )
+                forward_passes += 1
+                sequential_next_token = sample_greedy(
+                    sequential_outputs.logits[:, -1, :]
+                )
 
-        next_token = ar_tokens[:, acceptance_len]
+        acceptance_lengths.append(acceptance_len)
+        verification_margins.append(
+            token_margins[0, : acceptance_len + 1].cpu().tolist()
+        )
+
+        next_token = (
+            sequential_next_token
+            if sequential_next_token is not None
+            else ar_tokens[:, acceptance_len]
+        )
         end_idx = start_idx + acceptance_len + 1
         accepted_block = proposed_block[:, : acceptance_len + 1]
 
@@ -309,7 +375,13 @@ def generate_flowdraft_greedy(
             eos_offset = int(eos_positions[0, -1].item())
             output_ids[:, start_idx : start_idx + eos_offset + 1] = accepted_block[:, : eos_offset + 1]
             synchronize(device)
-            return output_ids[:, : start_idx + eos_offset + 1], time.perf_counter() - start, forward_passes, acceptance_lengths
+            return (
+                output_ids[:, : start_idx + eos_offset + 1],
+                time.perf_counter() - start,
+                forward_passes,
+                acceptance_lengths,
+                verification_margins,
+            )
 
         output_ids[:, start_idx:end_idx] = accepted_block
         generated_count += acceptance_len
@@ -321,11 +393,23 @@ def generate_flowdraft_greedy(
             generated_count += 1
             if eos_token_id is not None and int(next_token.item()) == int(eos_token_id):
                 synchronize(device)
-                return output_ids[:, : start_idx + 1], time.perf_counter() - start, forward_passes, acceptance_lengths
+                return (
+                    output_ids[:, : start_idx + 1],
+                    time.perf_counter() - start,
+                    forward_passes,
+                    acceptance_lengths,
+                    verification_margins,
+                )
 
     synchronize(device)
     elapsed = time.perf_counter() - start
-    return output_ids[:, :max_length], elapsed, forward_passes, acceptance_lengths
+    return (
+        output_ids[:, :max_length],
+        elapsed,
+        forward_passes,
+        acceptance_lengths,
+        verification_margins,
+    )
 
 
 def percentile(values: list[float], p: float) -> float:
@@ -368,7 +452,12 @@ def main() -> None:
         input_ids = encode_prompt(tokenizer, row["prompt"], model.device)
         _ = generate_ar_greedy(model, input_ids, min(16, args.max_new_tokens), tokenizer.eos_token_id)
         _ = generate_flowdraft_greedy(
-            model, input_ids, min(16, args.max_new_tokens), tokenizer.eos_token_id, args.flow_steps
+            model,
+            input_ids,
+            min(16, args.max_new_tokens),
+            tokenizer.eos_token_id,
+            args.flow_steps,
+            args.parity_margin_threshold,
         )
 
     for row in prompts:
@@ -376,18 +465,37 @@ def main() -> None:
         ar_ids, ar_seconds, ar_forwards = generate_ar_greedy(
             model, input_ids, args.max_new_tokens, tokenizer.eos_token_id
         )
-        flow_ids, flow_seconds, flow_forwards, acceptance = generate_flowdraft_greedy(
-            model, input_ids, args.max_new_tokens, tokenizer.eos_token_id, args.flow_steps
+        flow_ids, flow_seconds, flow_forwards, acceptance, verification_margins = generate_flowdraft_greedy(
+            model,
+            input_ids,
+            args.max_new_tokens,
+            tokenizer.eos_token_id,
+            args.flow_steps,
+            args.parity_margin_threshold,
         )
 
         ar_new = int(ar_ids.shape[1] - input_ids.shape[1])
         flow_new = int(flow_ids.shape[1] - input_ids.shape[1])
         parity = bool(torch.equal(ar_ids, flow_ids))
+        mismatch_at = first_mismatch(ar_ids, flow_ids)
         record = {
             "id": row["id"],
             "prompt": row["prompt"],
             "parity_ok": parity,
-            "first_mismatch_at": first_mismatch(ar_ids, flow_ids),
+            "first_mismatch_at": mismatch_at,
+            "first_mismatch_generated_offset": (
+                mismatch_at - input_ids.shape[1] if mismatch_at is not None else None
+            ),
+            "ar_mismatch_token_id": (
+                int(ar_ids[0, mismatch_at].item())
+                if mismatch_at is not None and mismatch_at < ar_ids.shape[1]
+                else None
+            ),
+            "flowdraft_mismatch_token_id": (
+                int(flow_ids[0, mismatch_at].item())
+                if mismatch_at is not None and mismatch_at < flow_ids.shape[1]
+                else None
+            ),
             "ar_tokens": ar_new,
             "flowdraft_tokens": flow_new,
             "ar_seconds": ar_seconds,
@@ -401,11 +509,14 @@ def main() -> None:
             "flowdraft_forward_passes": flow_forwards,
             "flowdraft_tpf": flow_new / flow_forwards if flow_forwards else 0.0,
             "flow_steps": args.flow_steps,
+            "parity_margin_threshold": args.parity_margin_threshold,
             "acceptance_mean": statistics.mean(acceptance) if acceptance else 0.0,
             "acceptance_p50": percentile([float(x) for x in acceptance], 0.50),
             "acceptance_p90": percentile([float(x) for x in acceptance], 0.90),
             "acceptance_cycles": len(acceptance),
             "acceptance_sum": sum(acceptance),
+            "acceptance_lengths": acceptance,
+            "verification_margins": verification_margins,
             "reached_max_new_tokens": ar_new >= args.max_new_tokens,
         }
         rows.append(record)
@@ -444,6 +555,7 @@ def main() -> None:
         "checkpoint": str(Path(args.checkpoint).resolve()),
         "benchmark_task": benchmark_task,
         "flow_steps": args.flow_steps,
+        "parity_margin_threshold": args.parity_margin_threshold,
         "dtype": args.dtype,
         "attn_implementation": args.attn_implementation,
         "parity_rate": sum(1 for row in rows if row["parity_ok"]) / len(rows) if rows else 0.0,
