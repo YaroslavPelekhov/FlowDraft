@@ -52,6 +52,7 @@ from orthrus_training.losses import (
     prefix_survival_weights,
     token_accuracy,
 )
+from orthrus_training.flowtree import soft_topk_coverage_loss
 from orthrus_training.modeling import (
     build_orthrus_from_qwen,
     count_parameters,
@@ -128,6 +129,14 @@ def parse_args():
     parser.add_argument("--prefix-weight-decay", type=float, default=0.9)
     parser.add_argument("--consistency-weight", type=float, default=0.0)
     parser.add_argument("--consistency-start-step", type=int, default=400)
+    parser.add_argument(
+        "--tree-coverage-weight",
+        type=float,
+        default=0.0,
+        help="Weight for the smooth top-k teacher-path coverage objective used by FlowTree.",
+    )
+    parser.add_argument("--tree-branch-width", type=int, default=2)
+    parser.add_argument("--tree-branch-depth", type=int, default=3)
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--log-every", type=int, default=10)
@@ -814,6 +823,8 @@ def main() -> None:
     running_consistency_contribution = 0.0
     running_endpoint_consistency = 0.0
     running_temporal_drift = 0.0
+    running_tree_coverage = 0.0
+    running_tree_coverage_contribution = 0.0
     running_acc = 0.0
     running_first_acc = 0.0
     running_first_ce = 0.0
@@ -954,6 +965,16 @@ def main() -> None:
                     direct_prefix_metrics = prefix_acceptance_metrics(
                         direct_logits.detach(), direct_targets, args.block_size
                     )
+                tree_logits = direct_logits if args.flow_objective == "ecld" and torch.any(out["one_jump_mask"]) else supervised_logits
+                tree_targets = direct_targets if args.flow_objective == "ecld" and torch.any(out["one_jump_mask"]) else supervised_targets
+                tree_coverage_loss = torch.zeros((), device=device)
+                if args.tree_coverage_weight > 0:
+                    tree_coverage_loss = soft_topk_coverage_loss(
+                        tree_logits.reshape(-1, args.block_size - 1, tree_logits.shape[-1]),
+                        tree_targets.reshape(-1, args.block_size - 1),
+                        branch_width=args.tree_branch_width,
+                        branch_depth=args.tree_branch_depth,
+                    )
                 consistency = torch.zeros((), device=device)
                 endpoint_consistency = torch.zeros((), device=device)
                 temporal_drift = torch.zeros((), device=device)
@@ -992,6 +1013,7 @@ def main() -> None:
                     + args.prefix_loss_weight * direct_prefix_loss
                     + args.prefix_kl_weight * prefix_kl_loss
                     + args.direct_prefix_kl_weight * direct_prefix_kl
+                    + args.tree_coverage_weight * tree_coverage_loss
                     + args.consistency_weight
                     * (4.0 * endpoint_consistency + 2.0 * args.temporal_drift_weight * temporal_drift)
                 )
@@ -1001,6 +1023,7 @@ def main() -> None:
                 consistency_contribution = args.consistency_weight * (
                     4.0 * endpoint_consistency + 2.0 * args.temporal_drift_weight * temporal_drift
                 )
+                tree_coverage_contribution = args.tree_coverage_weight * tree_coverage_loss
                 (loss / args.gradient_accumulation_steps).backward()
 
                 running_loss += float(loss.detach().cpu())
@@ -1017,6 +1040,8 @@ def main() -> None:
                 running_consistency_contribution += float(consistency_contribution.detach().cpu())
                 running_endpoint_consistency += float(endpoint_consistency.detach().cpu())
                 running_temporal_drift += float(temporal_drift.detach().cpu())
+                running_tree_coverage += float(tree_coverage_loss.detach().cpu())
+                running_tree_coverage_contribution += float(tree_coverage_contribution.detach().cpu())
                 reported_top1 = direct_top1 if args.flow_objective == "ecld" else token_accuracy(
                     supervised_logits.detach(), supervised_targets
                 )
@@ -1056,6 +1081,8 @@ def main() -> None:
                         avg_consistency_contribution = running_consistency_contribution / denom
                         avg_endpoint_consistency = running_endpoint_consistency / denom
                         avg_temporal_drift = running_temporal_drift / denom
+                        avg_tree_coverage = running_tree_coverage / denom
+                        avg_tree_coverage_contribution = running_tree_coverage_contribution / denom
                         avg_acc = running_acc / denom
                         avg_first_acc = running_first_acc / denom
                         avg_first_ce = running_first_ce / denom
@@ -1087,6 +1114,11 @@ def main() -> None:
                             "consistency_contribution": avg_consistency_contribution,
                             "endpoint_consistency_ce": avg_endpoint_consistency,
                             "temporal_drift": avg_temporal_drift,
+                            "tree_coverage_loss": avg_tree_coverage,
+                            "tree_coverage_weight": args.tree_coverage_weight,
+                            "tree_coverage_contribution": avg_tree_coverage_contribution,
+                            "tree_branch_width": args.tree_branch_width,
+                            "tree_branch_depth": args.tree_branch_depth,
                             "top1": avg_acc,
                             "first_token_acc": avg_first_acc,
                             "first_token_ce": avg_first_ce,
@@ -1105,6 +1137,7 @@ def main() -> None:
                             f"prefix_kl={avg_prefix_kl:.5f} direct_prefix_kl={avg_direct_prefix_kl:.5f} "
                             f"prefix_term={avg_direct_prefix_contribution:.5f} "
                             f"consistency={avg_consistency:.5f} consistency_term={avg_consistency_contribution:.5f} "
+                            f"tree_cover={avg_tree_coverage:.5f} tree_term={avg_tree_coverage_contribution:.5f} "
                             f"endpoint_ce={avg_endpoint_consistency:.5f} drift={avg_temporal_drift:.5f} "
                             f"top1={avg_acc:.4f} first={avg_first_acc:.4f} "
                             f"greedy_prefix={avg_greedy_prefix_acceptance:.2f} "
@@ -1127,6 +1160,8 @@ def main() -> None:
                         running_consistency_contribution = 0.0
                         running_endpoint_consistency = 0.0
                         running_temporal_drift = 0.0
+                        running_tree_coverage = 0.0
+                        running_tree_coverage_contribution = 0.0
                         running_acc = 0.0
                         running_first_acc = 0.0
                         running_first_ce = 0.0

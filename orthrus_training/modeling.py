@@ -191,6 +191,102 @@ def parallel_verifier_logits(
     )
 
 
+@contextmanager
+def flowtree_ar_verifier_mode(model: torch.nn.Module, visibility: torch.Tensor):
+    """Expose a parent-aware AR verifier mask for one packed FlowTree.
+
+    ``visibility[q, k]`` is true precisely when tree token ``k`` lies on the
+    inclusive root-to-query path.  This makes every node's logits identical to
+    an AR rollout on its own branch, subject only to floating-point kernels.
+    """
+
+    upstream = sys.modules.get("upstream_orthrus_model")
+    if upstream is None:
+        raise RuntimeError("The upstream Orthrus module has not been imported")
+    if visibility.dim() != 2 or visibility.shape[0] != visibility.shape[1]:
+        raise ValueError("visibility must have shape [tree_nodes, tree_nodes]")
+
+    original_mask_builder = upstream.generate_dual_pass_mask
+    swaps: list[tuple[torch.nn.Module, str, torch.nn.Module]] = []
+
+    def generate_tree_mask(B, H, diffusion_length, ar_len, block_size, causal_limit, sparse_block_size=128):
+        if diffusion_length != visibility.shape[0]:
+            raise ValueError("FlowTree visibility does not match diffusion length")
+
+        def tree_mask_fn(b, h, q_idx, kv_idx):
+            is_kv_ar = kv_idx < ar_len
+            valid_ar = is_kv_ar & (kv_idx <= causal_limit[b, q_idx])
+            draft_kv_idx = kv_idx - ar_len
+            valid_tree = (~is_kv_ar) & visibility[q_idx, draft_kv_idx]
+            return valid_ar | valid_tree
+
+        return upstream.create_block_mask(
+            tree_mask_fn,
+            B=B,
+            H=H,
+            Q_LEN=diffusion_length,
+            KV_LEN=ar_len + diffusion_length,
+            BLOCK_SIZE=sparse_block_size,
+        )
+
+    projection_pairs = (
+        ("q_proj_diff", "q_proj"),
+        ("k_proj_diff", "k_proj"),
+        ("v_proj_diff", "v_proj"),
+        ("o_proj_diff", "o_proj"),
+        ("q_norm_diff", "q_norm"),
+        ("k_norm_diff", "k_norm"),
+    )
+    try:
+        upstream.generate_dual_pass_mask = generate_tree_mask
+        for layer in model.model.layers:
+            attention = layer.self_attn
+            for diffusion_name, ar_name in projection_pairs:
+                original = getattr(attention, diffusion_name)
+                swaps.append((attention, diffusion_name, original))
+                setattr(attention, diffusion_name, getattr(attention, ar_name))
+        yield
+    finally:
+        for module, name, original in reversed(swaps):
+            setattr(module, name, original)
+        upstream.generate_dual_pass_mask = original_mask_builder
+
+
+@torch.no_grad()
+def flowtree_verifier_logits(
+    model: torch.nn.Module,
+    tree_token_ids: torch.Tensor,
+    tree_position_ids: torch.Tensor,
+    visibility: torch.Tensor,
+    causal_limit: torch.Tensor,
+    past_key_values,
+    ar_seq_len: int,
+) -> torch.Tensor:
+    """Verify every FlowTree node under its own shared-prefix AR context."""
+
+    if tree_token_ids.dim() != 2 or tree_token_ids.shape[0] != 1:
+        raise ValueError("FlowTree verifier currently supports one request at a time")
+    was_training = model.training
+    # Orthrus creates its FlexAttention mask only in train mode. Its Qwen path
+    # has no dropout, and this call stays under no_grad.
+    model.train()
+    try:
+        with flowtree_ar_verifier_mode(model, visibility):
+            outputs = model(
+                input_ids=tree_token_ids,
+                position_ids=tree_position_ids,
+                past_key_values=past_key_values,
+                use_cache=False,
+                is_diffusion_pass=True,
+                causal_limit=causal_limit,
+                ar_seq_len=ar_seq_len,
+            )
+    finally:
+        if not was_training:
+            model.eval()
+    return outputs.logits
+
+
 def import_upstream_orthrus(upstream_dir: str | Path):
     upstream_dir = Path(upstream_dir).resolve()
     model_file = upstream_dir / "src" / "model.py"

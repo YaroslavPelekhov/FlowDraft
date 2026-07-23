@@ -13,6 +13,12 @@ from orthrus_training.flowdraft import (
     transport_categorical_state,
 )
 from orthrus_training.modeling import FlowDraftStateAdapter
+from orthrus_training.flowtree import (
+    ancestor_matrix,
+    build_flowtree,
+    greedy_path_coverage,
+    soft_topk_coverage_loss,
+)
 from orthrus_training.losses import (
     bounded_jsd_distillation,
     prefix_acceptance_metrics,
@@ -214,6 +220,37 @@ def test_endpoint_blocks_join_anchor_and_verifier_targets():
     blocks = make_endpoint_blocks(anchors, targets)
 
     assert blocks.tolist() == [[[4, 10, 11, 12], [8, 20, 21, 22]]]
+
+
+def test_flowtree_builds_shared_prefixes_and_covers_teacher_path():
+    logits = torch.full((4, 8), -5.0)
+    logits[0, 3] = 5.0
+    logits[0, 4] = 4.0
+    logits[1, 2] = 5.0
+    logits[1, 1] = 4.0
+    logits[2, 6] = 5.0
+    logits[3, 7] = 5.0
+    tree = build_flowtree(9, logits, branch_width=2, branch_depth=2, max_nodes=32)
+
+    assert tree.num_nodes == 15
+    assert greedy_path_coverage(tree, torch.tensor([3, 2, 6, 7])) == 4
+    visibility = ancestor_matrix(tree.parents)
+    assert bool(visibility[0, 0])
+    assert not bool(visibility[1, 2])
+    assert bool(visibility[-1, 0])
+
+
+def test_flowtree_coverage_surrogate_rewards_teacher_in_branch_budget():
+    targets = torch.tensor([[1, 2, 3]])
+    covered = torch.full((1, 3, 6), -4.0)
+    uncovered = covered.clone()
+    for pos, target in enumerate(targets[0].tolist()):
+        covered[0, pos, target] = 4.0
+        uncovered[0, pos, (target + 1) % 6] = 4.0
+        uncovered[0, pos, target] = -4.0
+
+    assert soft_topk_coverage_loss(covered, targets, branch_width=2, branch_depth=2) < 1e-3
+    assert soft_topk_coverage_loss(uncovered, targets, branch_width=2, branch_depth=2) > 0.1
 
 
 def test_bounded_jsd_is_zero_for_identical_logits_and_bounded():
