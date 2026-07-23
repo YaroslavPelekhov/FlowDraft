@@ -5,7 +5,7 @@ cd /workspace/FlowDraft-cfmproper
 export PYTHON_BIN=/workspace/flowdraft_venv/bin/python
 export TRAIN_MANIFEST=/workspace/flowdraft_data/nemotron_50k/manifest.json
 export EVAL_MANIFEST=/workspace/flowdraft_data/nemotron_50k_holdout/manifest.json
-export INIT_CHECKPOINT=/workspace/flowdraft_runs/flowdraft_v4_full_300/best
-export OUT_DIR="${OUT_DIR:-/workspace/flowdraft_runs/flowdraft_v5_prefix_ecld_2000_r2}"
+export INIT_CHECKPOINT=/workspace/flowdraft_runs/flowdraft_v5_prefix_ecld_2000_r2/best
+export OUT_DIR="${OUT_DIR:-/workspace/flowdraft_runs/flowdraft_v5_prefix_ecld_2000_r3}"
 export MAX_STEPS="${MAX_STEPS:-2000}"
 exec bash scripts/run_vast_flowdraft_v5_prefix_ecld.sh
