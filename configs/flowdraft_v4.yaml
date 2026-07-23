@@ -10,7 +10,7 @@ source_seed: 2718
 
 batch_size: 1
 gradient_accumulation_steps: 16
-num_anchor_blocks: 32
+num_anchor_blocks: 64
 epochs: 1
 max_steps: 300
 learning_rate: 1.0e-4
@@ -49,7 +49,7 @@ consistency_start_step: 75
 
 eval_every: 50
 eval_batches: 32
-eval_anchor_blocks: 16
+eval_anchor_blocks: 32
 eval_seed: 1701
 best_metric: eval_greedy_prefix_acceptance
 early_stopping_patience: 3
