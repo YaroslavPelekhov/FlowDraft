@@ -250,8 +250,9 @@ class DynamicSupportSimplexFlowRefiner(nn.Module):
         if int(candidate_ids.min()) < 0 or int(candidate_ids.max()) >= token_codebook.shape[0]:
             raise ValueError("candidate_ids are outside the token codebook")
 
-        candidate_codes = torch.nn.functional.embedding(candidate_ids, token_codebook).to(dtype=base_logits.dtype)
-        base_distribution = torch.softmax(base_logits.float(), dim=-1).to(dtype=base_logits.dtype)
+        module_dtype = self.input_proj.weight.dtype
+        candidate_codes = torch.nn.functional.embedding(candidate_ids, token_codebook).to(dtype=module_dtype)
+        base_distribution = torch.softmax(base_logits.float(), dim=-1).to(dtype=module_dtype)
         candidate_summary = (base_distribution.unsqueeze(-1) * candidate_codes).sum(dim=-2)
         normalized_logits = base_logits.float() - base_logits.float().mean(dim=-1, keepdim=True)
         normalized_logits = normalized_logits / normalized_logits.square().mean(dim=-1, keepdim=True).add(1e-6).sqrt()
@@ -263,10 +264,10 @@ class DynamicSupportSimplexFlowRefiner(nn.Module):
                 torch.cos(math.pi * target_time),
             ],
             dim=-1,
-        ).to(dtype=base_logits.dtype)
+        ).to(dtype=module_dtype)
         features = torch.cat(
-            [normalized_logits.to(dtype=base_logits.dtype), state, candidate_summary, phase], dim=-1
-        )
+            [normalized_logits.to(dtype=module_dtype), state.to(dtype=module_dtype), candidate_summary, phase], dim=-1
+        ).to(dtype=module_dtype)
         batch, blocks, positions, _ = features.shape
         features = features.reshape(batch * blocks, positions, -1)
         context = self.context_proj(self.context_norm(draft_hidden)).reshape(batch * blocks, positions, -1)
