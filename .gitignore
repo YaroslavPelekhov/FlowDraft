@@ -13,3 +13,8 @@ wandb/
 
 upstream_orthrus/
 orthrus_2605.12825.pdf
+
+# Compact experiment protocols live in Git; recoverable best/last weights live
+# in a private Hugging Face model repository.
+experiments/**/best/*.safetensors
+experiments/**/last/*.safetensors
