@@ -1,0 +1,63 @@
+# FlowDraft v4: frozen-Qwen teacher distillation plus categorical ECLD.
+# All optimization terms are soft AR-distribution objectives. Dataset tokens
+# only define samples of the endpoint path; they are never used as hard labels.
+upstream_dir: upstream_orthrus
+base_model: Qwen/Qwen3-1.7B
+block_size: 32
+mask_token_id: 151669
+source_prior: uniform
+source_seed: 2718
+
+batch_size: 1
+gradient_accumulation_steps: 16
+num_anchor_blocks: 32
+epochs: 1
+max_steps: 300
+learning_rate: 1.0e-4
+warmup_ratio: 0.05
+weight_decay: 0.0
+max_grad_norm: 1.0
+dtype: bf16
+attn_implementation: eager
+temperature: 1.0
+kl_reduction: tokenmean
+
+flow_objective: ecld
+diagonal_fraction: 0.50
+one_jump_fraction: 0.50
+flow_time_logit_mean: -0.4
+flow_time_logit_std: 1.0
+flow_time_max: 0.95
+flow_time_conditioning_scale: 0.05
+flow_state_adapter: true
+flow_adapter_bottleneck: 256
+endpoint_transport: dense
+endpoint_vocab_chunk_size: 8192
+ecld_time_weight: paper_clamped
+temporal_difference_epsilon: 0.02
+temporal_drift_weight: 1.0
+
+# Orthrus-aligned objective: no hard labels and no rejection-gated gradients.
+hard_ce_weight: 0.0
+prefix_loss_weight: 0.0
+prefix_kl_weight: 0.10
+direct_endpoint_teacher_weight: 1.0
+direct_prefix_kl_weight: 0.25
+prefix_weight_decay: 0.90
+consistency_weight: 0.00025
+consistency_start_step: 75
+
+eval_every: 50
+eval_batches: 32
+eval_anchor_blocks: 16
+eval_seed: 1701
+best_metric: eval_greedy_prefix_acceptance
+early_stopping_patience: 3
+save_every: 50
+checkpoint_format: trainable
+save_trainer_state: false
+gradient_checkpointing: false
+compile: false
+seed: 17
+num_workers: 2
+log_every: 10

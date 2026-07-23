@@ -37,6 +37,7 @@ from orthrus_training.flowdraft import (
     flow_map_step_size,
     make_flowdraft_batch,
     make_flowdraft_inputs_embeds,
+    sample_categorical_source_tokens,
     sample_cfm_time_pairs,
     sample_flow_state_mix,
     select_endpoint_logits,
@@ -77,6 +78,8 @@ def parse_args():
     )
     parser.add_argument("--block-size", type=int, default=32)
     parser.add_argument("--mask-token-id", type=int, default=151669)
+    parser.add_argument("--source-prior", choices=["uniform", "mask"], default="uniform")
+    parser.add_argument("--source-seed", type=int, default=2718)
     parser.add_argument("--num-anchor-blocks", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--max-steps", type=int, default=10000)
@@ -116,6 +119,12 @@ def parse_args():
     parser.add_argument("--hard-ce-weight", type=float, default=0.5)
     parser.add_argument("--prefix-loss-weight", type=float, default=0.0)
     parser.add_argument("--prefix-kl-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--direct-prefix-kl-weight",
+        type=float,
+        default=0.0,
+        help="Prefix-survival-weighted soft AR KL on exact (0 -> 1) proposal states.",
+    )
     parser.add_argument("--prefix-weight-decay", type=float, default=0.9)
     parser.add_argument("--consistency-weight", type=float, default=0.0)
     parser.add_argument("--consistency-start-step", type=int, default=400)
@@ -190,6 +199,8 @@ def flowdraft_forward(
     time_max: float = 0.95,
     time_conditioning_scale: float = 0.1,
     one_jump_fraction: float = 0.0,
+    source_prior: str = "uniform",
+    source_generator: torch.Generator | None = None,
     source_time: torch.Tensor | None = None,
     target_time: torch.Tensor | None = None,
     force_one_jump: bool = False,
@@ -205,6 +216,13 @@ def flowdraft_forward(
         input_ids=input_ids,
         anchors=anchors,
         block_size=block_size,
+    )
+    source_blocks = sample_categorical_source_tokens(
+        clean_blocks,
+        vocab_size=int(model.config.vocab_size),
+        mask_token_id=mask_token_id,
+        prior=source_prior,
+        generator=source_generator,
     )
     diagonal_mask = torch.ones(
         (input_ids.shape[0], anchors.shape[1]), dtype=torch.bool, device=device
@@ -246,6 +264,7 @@ def flowdraft_forward(
         clean_blocks=clean_blocks,
         mask_token_id=mask_token_id,
         state_mix=state_mix,
+        source_token_ids=source_blocks,
     )
     if flow_objective == "ecld":
         flow_inputs = condition_flowdraft_state(
@@ -279,6 +298,7 @@ def flowdraft_forward(
         "teacher_logits": teacher_logits,
         "target_ids": target_ids,
         "clean_blocks": clean_blocks,
+        "source_blocks": source_blocks,
         "position_ids": position_ids,
         "causal_limit": causal_limit,
         "past_key_values": ar_outputs.past_key_values,
@@ -303,6 +323,7 @@ def ecld_consistency_loss(
     model,
     first_logits: torch.Tensor,
     clean_blocks: torch.Tensor,
+    source_blocks: torch.Tensor,
     position_ids: torch.Tensor,
     causal_limit: torch.Tensor,
     past_key_values,
@@ -339,6 +360,9 @@ def ecld_consistency_loss(
     batch_size = clean_blocks.shape[0]
     off_blocks = int(off_diagonal.sum(dim=1)[0].item())
     selected_clean = clean_blocks[off_diagonal].reshape(batch_size, off_blocks, block_size)
+    selected_source_blocks = source_blocks[off_diagonal].reshape(
+        batch_size, off_blocks, block_size
+    )
     selected_positions = position_ids.reshape(batch_size, -1, block_size)[off_diagonal].reshape(
         batch_size, off_blocks * block_size
     )
@@ -354,6 +378,7 @@ def ecld_consistency_loss(
         clean_blocks=selected_clean,
         mask_token_id=mask_token_id,
         state_mix=selected_source,
+        source_token_ids=selected_source_blocks,
     ).reshape(batch_size, off_blocks, block_size, -1)
     if endpoint_transport == "dense":
         endpoint_embeds = exact_endpoint_embeddings(
@@ -464,6 +489,8 @@ def evaluate_distillation(
     max_batches: int,
     flow_objective: str,
     time_conditioning_scale: float,
+    source_prior: str,
+    source_seed: int,
 ) -> dict[str, float]:
     was_training = model.training
     model.eval()
@@ -475,6 +502,7 @@ def evaluate_distillation(
     first_token_ces = []
     greedy_prefix_acceptances = []
     prefix_expected_acceptances = []
+    source_generator = torch.Generator(device=device).manual_seed(source_seed)
 
     for batch_idx, batch in enumerate(dataloader):
         if batch_idx >= max_batches:
@@ -492,7 +520,10 @@ def evaluate_distillation(
             flow_objective=flow_objective,
             time_conditioning_scale=time_conditioning_scale,
             force_one_jump=flow_objective == "ecld",
+            source_prior=source_prior,
+            source_generator=source_generator,
         )
+        teacher_ids = out["teacher_logits"].argmax(dim=-1)
         losses.append(
             float(
                 forward_kl_distillation(
@@ -507,7 +538,7 @@ def evaluate_distillation(
             float(
                 F.cross_entropy(
                     out["student_logits"].reshape(-1, out["student_logits"].shape[-1]).float(),
-                    out["target_ids"].reshape(-1),
+                    teacher_ids.reshape(-1),
                 ).cpu()
             )
         )
@@ -515,14 +546,14 @@ def evaluate_distillation(
             float(
                 prefix_survival_cross_entropy(
                     out["student_logits"],
-                    out["target_ids"],
+                    teacher_ids,
                     block_size=block_size,
                     decay=prefix_weight_decay,
                 ).cpu()
             )
         )
-        accuracies.append(float(token_accuracy(out["student_logits"], out["target_ids"]).cpu()))
-        prefix_metrics = prefix_acceptance_metrics(out["student_logits"], out["target_ids"], block_size)
+        accuracies.append(float(token_accuracy(out["student_logits"], teacher_ids).cpu()))
+        prefix_metrics = prefix_acceptance_metrics(out["student_logits"], teacher_ids, block_size)
         first_token_accuracies.append(float(prefix_metrics["first_token_acc"].cpu()))
         first_token_ces.append(float(prefix_metrics["first_token_ce"].cpu()))
         greedy_prefix_acceptances.append(float(prefix_metrics["greedy_prefix_acceptance"].cpu()))
@@ -720,6 +751,8 @@ def main() -> None:
     model.config.flowdraft_adapter_bottleneck = args.flow_adapter_bottleneck
     model.config.flowdraft_one_jump_fraction = args.one_jump_fraction
     model.config.flowdraft_objective = args.flow_objective
+    model.config.flowdraft_source_prior = args.source_prior
+    model.config.flowdraft_source_seed = args.source_seed
     set_flowdraft_state_adapter_trainable(model, args.flow_state_adapter)
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
@@ -744,11 +777,11 @@ def main() -> None:
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
 
     metadata = vars(args) | {
-        "method": "flowdraft_categorical_flow_map_v2" if args.flow_state_adapter else (
+        "method": "flowdraft_teacher_forced_categorical_flow_map_v4" if args.flow_state_adapter else (
             "flowdraft_categorical_flow_map" if args.flow_objective == "ecld" else "flowdraft_legacy"
         ),
         "objective": (
-            "diagonal_vfm_teacher_distillation_plus_off_diagonal_finite_difference_ecld"
+            "teacher_forced_diagonal_vfm_plus_soft_prefix_kl_plus_off_diagonal_ecld"
             if args.flow_objective == "ecld"
             else "endpoint_teacher_distillation_plus_prefix_survival"
         ),
@@ -772,6 +805,8 @@ def main() -> None:
     running_prefix_loss = 0.0
     running_direct_prefix_contribution = 0.0
     running_prefix_kl_loss = 0.0
+    running_direct_prefix_kl = 0.0
+    running_direct_prefix_kl_contribution = 0.0
     running_consistency_loss = 0.0
     running_consistency_contribution = 0.0
     running_endpoint_consistency = 0.0
@@ -790,6 +825,7 @@ def main() -> None:
     started_at = time.perf_counter()
     metrics_file = (output_dir / "train_metrics.jsonl").open("a", encoding="utf-8")
     optimizer.zero_grad(set_to_none=True)
+    source_generator = torch.Generator(device=device).manual_seed(args.source_seed)
 
     try:
         progress = tqdm(total=total_steps, desc="flowdraft optimizer steps")
@@ -816,6 +852,8 @@ def main() -> None:
                     time_max=args.flow_time_max,
                     time_conditioning_scale=args.flow_time_conditioning_scale,
                     one_jump_fraction=args.one_jump_fraction,
+                    source_prior=args.source_prior,
+                    source_generator=source_generator,
                 )
 
                 supervised_mask = out["diagonal_mask"] if args.flow_objective == "ecld" else torch.ones_like(
@@ -828,7 +866,7 @@ def main() -> None:
                     out["teacher_logits"], supervised_mask, args.block_size - 1
                 ).reshape_as(supervised_logits)
                 supervised_targets = select_block_values(
-                    out["target_ids"], supervised_mask, args.block_size - 1
+                    out["teacher_logits"].argmax(dim=-1), supervised_mask, args.block_size - 1
                 ).reshape(input_ids.shape[0], -1)
                 ce_loss = forward_kl_distillation(
                     supervised_logits,
@@ -863,6 +901,7 @@ def main() -> None:
                     )
                 direct_teacher_kl = torch.zeros((), device=device)
                 direct_prefix_loss = torch.zeros((), device=device)
+                direct_prefix_kl = torch.zeros((), device=device)
                 direct_top1 = torch.zeros((), device=device)
                 direct_prefix_metrics = {
                     "first_token_acc": torch.zeros((), device=device),
@@ -878,7 +917,7 @@ def main() -> None:
                         out["teacher_logits"], out["one_jump_mask"], args.block_size - 1
                     ).reshape_as(direct_logits)
                     direct_targets = select_block_values(
-                        out["target_ids"], out["one_jump_mask"], args.block_size - 1
+                        out["teacher_logits"].argmax(dim=-1), out["one_jump_mask"], args.block_size - 1
                     ).reshape(input_ids.shape[0], -1)
                     direct_teacher_kl = forward_kl_distillation(
                         direct_logits,
@@ -891,6 +930,18 @@ def main() -> None:
                         direct_targets,
                         block_size=args.block_size,
                         decay=args.prefix_weight_decay,
+                    )
+                    direct_prefix_kl = forward_kl_distillation(
+                        direct_logits,
+                        direct_teacher,
+                        temperature=args.temperature,
+                        weights=prefix_survival_weights(
+                            block_size=args.block_size,
+                            decay=args.prefix_weight_decay,
+                            device=device,
+                            dtype=torch.float32,
+                        ),
+                        reduction=args.kl_reduction,
                     )
                     direct_top1 = token_accuracy(direct_logits.detach(), direct_targets)
                     direct_prefix_metrics = prefix_acceptance_metrics(
@@ -908,6 +959,7 @@ def main() -> None:
                         model=model,
                         first_logits=out["student_logits"],
                         clean_blocks=out["clean_blocks"],
+                        source_blocks=out["source_blocks"],
                         position_ids=out["position_ids"],
                         causal_limit=out["causal_limit"],
                         past_key_values=out["past_key_values"],
@@ -932,11 +984,13 @@ def main() -> None:
                     + args.hard_ce_weight * hard_ce_loss
                     + args.prefix_loss_weight * direct_prefix_loss
                     + args.prefix_kl_weight * prefix_kl_loss
+                    + args.direct_prefix_kl_weight * direct_prefix_kl
                     + args.consistency_weight
                     * (4.0 * endpoint_consistency + 2.0 * args.temporal_drift_weight * temporal_drift)
                 )
                 direct_teacher_contribution = args.direct_endpoint_teacher_weight * direct_teacher_kl
                 direct_prefix_contribution = args.prefix_loss_weight * direct_prefix_loss
+                direct_prefix_kl_contribution = args.direct_prefix_kl_weight * direct_prefix_kl
                 consistency_contribution = args.consistency_weight * (
                     4.0 * endpoint_consistency + 2.0 * args.temporal_drift_weight * temporal_drift
                 )
@@ -950,6 +1004,8 @@ def main() -> None:
                 running_prefix_loss += float(direct_prefix_loss.detach().cpu())
                 running_direct_prefix_contribution += float(direct_prefix_contribution.detach().cpu())
                 running_prefix_kl_loss += float(prefix_kl_loss.detach().cpu())
+                running_direct_prefix_kl += float(direct_prefix_kl.detach().cpu())
+                running_direct_prefix_kl_contribution += float(direct_prefix_kl_contribution.detach().cpu())
                 running_consistency_loss += float(consistency.detach().cpu())
                 running_consistency_contribution += float(consistency_contribution.detach().cpu())
                 running_endpoint_consistency += float(endpoint_consistency.detach().cpu())
@@ -987,6 +1043,8 @@ def main() -> None:
                         avg_prefix = running_prefix_loss / denom
                         avg_direct_prefix_contribution = running_direct_prefix_contribution / denom
                         avg_prefix_kl = running_prefix_kl_loss / denom
+                        avg_direct_prefix_kl = running_direct_prefix_kl / denom
+                        avg_direct_prefix_kl_contribution = running_direct_prefix_kl_contribution / denom
                         avg_consistency = running_consistency_loss / denom
                         avg_consistency_contribution = running_consistency_contribution / denom
                         avg_endpoint_consistency = running_endpoint_consistency / denom
@@ -1014,6 +1072,9 @@ def main() -> None:
                             "prefix_contribution": avg_direct_prefix_contribution,
                             "prefix_kl": avg_prefix_kl,
                             "prefix_kl_weight": args.prefix_kl_weight,
+                            "direct_prefix_kl": avg_direct_prefix_kl,
+                            "direct_prefix_kl_weight": args.direct_prefix_kl_weight,
+                            "direct_prefix_kl_contribution": avg_direct_prefix_kl_contribution,
                             "prefix_weight_decay": args.prefix_weight_decay,
                             "consistency_loss": avg_consistency,
                             "consistency_contribution": avg_consistency_contribution,
@@ -1034,7 +1095,8 @@ def main() -> None:
                             f"direct_kl={avg_direct_teacher_kl:.5f} "
                             f"direct_term={avg_direct_teacher_contribution:.5f} "
                             f"hard_ce={avg_hard_ce:.5f} prefix_ce={avg_prefix:.5f} "
-                            f"prefix_kl={avg_prefix_kl:.5f} prefix_term={avg_direct_prefix_contribution:.5f} "
+                            f"prefix_kl={avg_prefix_kl:.5f} direct_prefix_kl={avg_direct_prefix_kl:.5f} "
+                            f"prefix_term={avg_direct_prefix_contribution:.5f} "
                             f"consistency={avg_consistency:.5f} consistency_term={avg_consistency_contribution:.5f} "
                             f"endpoint_ce={avg_endpoint_consistency:.5f} drift={avg_temporal_drift:.5f} "
                             f"top1={avg_acc:.4f} first={avg_first_acc:.4f} "
@@ -1052,6 +1114,8 @@ def main() -> None:
                         running_prefix_loss = 0.0
                         running_direct_prefix_contribution = 0.0
                         running_prefix_kl_loss = 0.0
+                        running_direct_prefix_kl = 0.0
+                        running_direct_prefix_kl_contribution = 0.0
                         running_consistency_loss = 0.0
                         running_consistency_contribution = 0.0
                         running_endpoint_consistency = 0.0
@@ -1080,6 +1144,8 @@ def main() -> None:
                                 max_batches=args.eval_batches,
                                 flow_objective=args.flow_objective,
                                 time_conditioning_scale=args.flow_time_conditioning_scale,
+                                source_prior=args.source_prior,
+                                source_seed=args.source_seed + 1,
                             )
                         eval_record.update({"step": global_step, "epoch": epoch, "kind": "eval"})
                         print(
