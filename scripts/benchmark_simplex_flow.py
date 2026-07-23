@@ -118,11 +118,12 @@ def generate_simplex_flow_greedy(model, head, input_ids, max_new_tokens, eos_tok
             values, candidates = draft.logits[:, :-1, :].topk(head.candidate_count, dim=-1)
             if diff_len == block_size:
                 state = torch.full_like(values, 1.0 / head.candidate_count)
+                flow_values = values.reshape(1, 1, diff_len - 1, head.candidate_count)
                 for index in range(max(1, flow_steps)):
                     s = torch.full(values.shape[:-1], index / max(1, flow_steps), device=device)
                     t = torch.full(values.shape[:-1], (index + 1) / max(1, flow_steps), device=device)
                     endpoint = head(
-                        values,
+                        flow_values,
                         state.reshape(1, 1, diff_len - 1, -1),
                         s.reshape(1, 1, diff_len - 1),
                         t.reshape(1, 1, diff_len - 1),
