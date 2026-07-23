@@ -26,7 +26,7 @@ HF_REPO_ID="${HF_REPO_ID:-}"
 HF_RUN_PATH="${HF_RUN_PATH:-}"
 
 if [ -e "$OUT_DIR" ]; then
-  existing_entries="$(find "$OUT_DIR" -mindepth 1 -maxdepth 1 -printf '%f\n' | grep -vx 'run.log' || true)"
+  existing_entries="$(find "$OUT_DIR" -mindepth 1 -maxdepth 1 -printf '%f\n' | grep -vxE '(run.log|supervisor.log|supervisor.err.log)' || true)"
   if [ -n "$existing_entries" ]; then
     log "Refusing to overwrite existing output: $OUT_DIR"
     exit 2
