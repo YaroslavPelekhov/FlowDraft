@@ -1,0 +1,13 @@
+{
+  "aggregate_speedup": 1.0226569539899508,
+  "aggregate_tpf": 1.1530054644808743,
+  "base_checkpoint": "/workspace/flowdraft_runs/flowdraft_v4_full_300/best",
+  "checkpoint": "/workspace/flowdraft_runs/residual_support_flow_screen_160_r2/best",
+  "flow_steps": 2,
+  "method": "identity-aware dynamic-support categorical flow map",
+  "num_prompts": 10,
+  "parity_rate": 1.0,
+  "total_cfm_head_calls": 272,
+  "total_qwen_forward_passes": 549,
+  "weighted_acceptance": 1.4881889763779528
+}

@@ -1,0 +1,29 @@
+# FeatureFlowMap screening run.  It uses a deployment-identical source at t=0,
+# diagonal endpoint flow matching, and endpoint self-consistency (ECLD).
+max_steps: 1200
+batch_size: 1
+num_anchor_blocks: 64
+learning_rate: 0.0003
+warmup_ratio: 0.08
+weight_decay: 0.01
+max_grad_norm: 1.0
+root_hidden_weight: 0.35
+diagonal_hidden_weight: 0.35
+teacher_kl_weight: 0.35
+prefix_loss_weight: 1.5
+consistency_weight: 0.15
+prefix_weight_decay: 0.90
+latent_size: 768
+num_layers: 4
+num_heads: 12
+dropout: 0.0
+dtype: bf16
+attn_implementation: eager
+eval_every: 100
+eval_batches: 16
+eval_anchor_blocks: 64
+early_stopping_patience: 8
+seed: 131
+source_seed: 901
+num_workers: 2
+log_every: 20
