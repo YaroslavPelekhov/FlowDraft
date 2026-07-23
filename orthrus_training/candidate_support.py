@@ -118,3 +118,49 @@ def select_candidate_support(
         raise RuntimeError("candidate pool did not contain enough valid token ids")
     values = logits.gather(-1, ids)
     return values, ids
+
+
+def select_dynamic_candidate_support(
+    logits: torch.Tensor,
+    candidate_count: int,
+    dynamic_ids: torch.Tensor,
+    base_candidate_count: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Merge parent top-k with context-specific retrieved token ids.
+
+    Candidate order is deliberately stable: the parent distribution first,
+    learned retrieval next, then additional parent-ranked tokens to replace
+    duplicates. The result remains a fixed-size categorical simplex.
+    """
+
+    if logits.dim() < 2 or candidate_count < 2:
+        raise ValueError("logits must be [..., vocab] and candidate_count must be >=2")
+    if not 0 < base_candidate_count < candidate_count:
+        raise ValueError("base_candidate_count must be in (0, candidate_count)")
+    if dynamic_ids.shape[:-1] != logits.shape[:-1] or dynamic_ids.dim() != logits.dim():
+        raise ValueError("dynamic_ids must match logits except for its final width")
+    if dynamic_ids.dtype != torch.long or dynamic_ids.shape[-1] == 0:
+        raise ValueError("dynamic_ids must be non-empty torch.long ids")
+    vocab_size = logits.shape[-1]
+    if candidate_count > vocab_size:
+        raise ValueError("candidate_count cannot exceed vocabulary size")
+    if int(dynamic_ids.min()) < 0 or int(dynamic_ids.max()) >= vocab_size:
+        raise ValueError("dynamic_ids contain an out-of-vocabulary token")
+
+    fallback_count = min(vocab_size, candidate_count + dynamic_ids.shape[-1])
+    fallback_ids = logits.topk(fallback_count, dim=-1).indices
+    base_ids = fallback_ids[..., :base_candidate_count]
+    pool = torch.cat([base_ids, dynamic_ids, fallback_ids[..., base_candidate_count:]], dim=-1)
+    width = pool.shape[-1]
+    equality = pool.unsqueeze(-1).eq(pool.unsqueeze(-2))
+    earlier = torch.tril(torch.ones((width, width), dtype=torch.bool, device=pool.device), diagonal=-1)
+    duplicate = (equality & earlier).any(dim=-1)
+    valid = ~duplicate
+    ranks = valid.to(torch.long).cumsum(dim=-1)
+    wanted = torch.arange(1, candidate_count + 1, device=pool.device).view(
+        *((1,) * (pool.dim() - 1)), candidate_count, 1
+    )
+    selected_indices = (ranks.unsqueeze(-2) == wanted).to(torch.int64).argmax(dim=-1)
+    ids = pool.gather(-1, selected_indices)
+    values = logits.gather(-1, ids)
+    return values, ids

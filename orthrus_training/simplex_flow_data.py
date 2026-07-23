@@ -20,8 +20,9 @@ def collect_base_draft_logits(
     input_ids: torch.Tensor,
     num_blocks: int,
     generator: torch.Generator,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return parent draft logits and frozen AR teacher ids by independently anchored block."""
+    return_hidden: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Collect parent logits, AR targets, and optionally frozen diffusion features."""
 
     block_size = int(model.config.block_size)
     anchors = sample_anchor_positions(input_ids.shape[0], input_ids.shape[1], block_size, num_blocks, input_ids.device)
@@ -62,4 +63,10 @@ def collect_base_draft_logits(
         ar_seq_len=input_ids.shape[1],
     )
     shape = (input_ids.shape[0], num_blocks, block_size - 1)
-    return select_endpoint_logits(draft.logits, block_size).reshape(*shape, -1), teacher.reshape(shape)
+    logits = select_endpoint_logits(draft.logits, block_size).reshape(*shape, -1)
+    targets = teacher.reshape(shape)
+    if not return_hidden:
+        return logits, targets
+    hidden = draft.hidden_states[-1]
+    hidden = hidden.reshape(input_ids.shape[0], num_blocks, block_size, -1)[:, :, : block_size - 1, :]
+    return logits, targets, hidden
