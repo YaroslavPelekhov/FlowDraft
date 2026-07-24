@@ -89,6 +89,11 @@ def sample_greedy(logits: torch.Tensor) -> torch.Tensor:
     return logits.argmax(dim=-1)
 
 
+def synchronize(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
 def first_mismatch(a: torch.Tensor, b: torch.Tensor) -> int | None:
     min_len = min(a.shape[1], b.shape[1])
     mismatch = (a[:, :min_len] != b[:, :min_len]).nonzero()
@@ -115,6 +120,7 @@ def generate_ar_greedy(model, input_ids: torch.Tensor, max_new_tokens: int, eos_
     output_ids = [input_ids]
     position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
 
+    synchronize(input_ids.device)
     start = time.perf_counter()
     outputs = model(input_ids=input_ids, position_ids=position_ids, past_key_values=past_key_values, use_cache=True)
     forward_passes = 1
@@ -137,6 +143,7 @@ def generate_ar_greedy(model, input_ids: torch.Tensor, max_new_tokens: int, eos_
         forward_passes += 1
         next_token = sample_greedy(outputs.logits[:, -1, :])
 
+    synchronize(input_ids.device)
     elapsed = time.perf_counter() - start
     return torch.cat(output_ids + generated, dim=1), elapsed, forward_passes
 
@@ -152,6 +159,7 @@ def generate_orthrus_greedy(model, input_ids: torch.Tensor, max_new_tokens: int,
     output_ids = torch.full((1, max_length + block_size), mask_token_id, dtype=torch.long, device=device)
     output_ids[:, : input_ids.shape[1]] = input_ids
 
+    synchronize(device)
     start = time.perf_counter()
     position_ids = torch.arange(input_ids.shape[1], device=device).unsqueeze(0)
     outputs = model(input_ids=input_ids, position_ids=position_ids, past_key_values=past_key_values)
@@ -164,6 +172,7 @@ def generate_orthrus_greedy(model, input_ids: torch.Tensor, max_new_tokens: int,
     acceptance_lengths: list[int] = []
 
     if eos_token_id is not None and int(next_token.item()) == int(eos_token_id):
+        synchronize(device)
         return output_ids[:, : start_idx + 1], time.perf_counter() - start, forward_passes, acceptance_lengths
 
     while generated_count < max_new_tokens and start_idx < max_length - 1:
@@ -214,6 +223,7 @@ def generate_orthrus_greedy(model, input_ids: torch.Tensor, max_new_tokens: int,
             eos_offset = int(eos_positions[0, -1].item())
             output_ids[:, start_idx : start_idx + eos_offset + 1] = accepted_block[:, : eos_offset + 1]
             generated_count += eos_offset
+            synchronize(device)
             return output_ids[:, : start_idx + eos_offset + 1], time.perf_counter() - start, forward_passes, acceptance_lengths
 
         output_ids[:, start_idx:end_idx] = accepted_block
@@ -225,8 +235,10 @@ def generate_orthrus_greedy(model, input_ids: torch.Tensor, max_new_tokens: int,
             output_ids[:, start_idx] = next_token
             generated_count += 1
             if eos_token_id is not None and int(next_token.item()) == int(eos_token_id):
+                synchronize(device)
                 return output_ids[:, : start_idx + 1], time.perf_counter() - start, forward_passes, acceptance_lengths
 
+    synchronize(device)
     elapsed = time.perf_counter() - start
     return output_ids[:, :max_length], elapsed, forward_passes, acceptance_lengths
 
@@ -314,6 +326,11 @@ def main() -> None:
             for row in rows:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
+    total_ar_tokens = sum(row["ar_tokens"] for row in rows)
+    total_orthrus_tokens = sum(row["orthrus_tokens"] for row in rows)
+    total_ar_seconds = sum(row["ar_seconds"] for row in rows)
+    total_orthrus_seconds = sum(row["orthrus_seconds"] for row in rows)
+    total_orthrus_forwards = sum(row["orthrus_forward_passes"] for row in rows)
     summary = {
         "num_prompts": len(rows),
         "command": [sys.executable, *sys.argv],
@@ -334,6 +351,14 @@ def main() -> None:
         "mean_ar_tokens_per_sec": statistics.mean(row["ar_tokens_per_sec"] for row in rows) if rows else 0.0,
         "mean_orthrus_tokens_per_sec": statistics.mean(row["orthrus_tokens_per_sec"] for row in rows) if rows else 0.0,
         "mean_orthrus_tpf": statistics.mean(row["orthrus_tpf"] for row in rows) if rows else 0.0,
+        "aggregate_speedup": (
+            (total_orthrus_tokens / total_orthrus_seconds)
+            / (total_ar_tokens / total_ar_seconds)
+            if total_ar_seconds and total_orthrus_seconds and total_ar_tokens
+            else 0.0
+        ),
+        "aggregate_orthrus_tpf": total_orthrus_tokens / total_orthrus_forwards if total_orthrus_forwards else 0.0,
+        "total_orthrus_forward_passes": total_orthrus_forwards,
         "mean_acceptance": statistics.mean(row["acceptance_mean"] for row in rows) if rows else 0.0,
         "p50_acceptance": percentile([row["acceptance_p50"] for row in rows], 0.50),
         "p90_acceptance": percentile([row["acceptance_p90"] for row in rows], 0.90),
@@ -341,13 +366,13 @@ def main() -> None:
     summary["paper_speedup_target"] = args.paper_speedup_target
     summary["paper_tpf_target"] = args.paper_tpf_target
     summary["speedup_vs_paper_target"] = (
-        summary["mean_speedup"] / args.paper_speedup_target if args.paper_speedup_target > 0 else 0.0
+        summary["aggregate_speedup"] / args.paper_speedup_target if args.paper_speedup_target > 0 else 0.0
     )
     summary["tpf_vs_paper_target"] = (
-        summary["mean_orthrus_tpf"] / args.paper_tpf_target if args.paper_tpf_target > 0 else 0.0
+        summary["aggregate_orthrus_tpf"] / args.paper_tpf_target if args.paper_tpf_target > 0 else 0.0
     )
-    summary["speedup_gap_to_paper_target"] = args.paper_speedup_target - summary["mean_speedup"]
-    summary["tpf_gap_to_paper_target"] = args.paper_tpf_target - summary["mean_orthrus_tpf"]
+    summary["speedup_gap_to_paper_target"] = args.paper_speedup_target - summary["aggregate_speedup"]
+    summary["tpf_gap_to_paper_target"] = args.paper_tpf_target - summary["aggregate_orthrus_tpf"]
     print("SUMMARY " + json.dumps(summary, ensure_ascii=False), flush=True)
 
     if args.summary_json:
