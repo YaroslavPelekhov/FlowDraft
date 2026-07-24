@@ -13,13 +13,15 @@ Clean Orthrus reconstruction trained from `Qwen/Qwen3-1.7B` with the same packed
 
 ## Fixed-Prompt Efficiency Comparison
 
-TPF is aggregate generated tokens divided by aggregate frozen-verifier forward passes. Speedup is aggregate AR wall-clock time divided by aggregate accelerated wall-clock time. Accepted length is the mean accepted draft-token prefix per proposal cycle. These are efficiency measurements only; task accuracy/pass@1 is not scored here.
+TPF is aggregate generated tokens divided by aggregate frozen-verifier forward passes. Speedup is aggregate AR wall-clock time divided by aggregate accelerated wall-clock time. These are efficiency measurements only; task accuracy/pass@1 is not scored here.
 
-| Method | AIME25 accepted | AIME25 TPF | AIME25 speedup | AIME25 parity | HumanEval accepted | HumanEval TPF | HumanEval speedup | HumanEval parity |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| FlowDraft (ours, endpoint Flow Map) | 0.792 | 1.761 | 1.493x | 100% | 0.718 | 1.647 | 1.394x | 100% |
-| Orthrus (ours, clean budget-matched reconstruction) | 1.777 | 1.371 | 1.276x | 100% | 2.226 | 1.591 | 1.476x | 100% |
-| Orthrus (released reference checkpoint) | 6.978 | 3.459 | 3.124x | 100% | 9.084 | 4.559 | 4.090x | 100% |
+| Method | AIME25 TPF | AIME25 speedup | AIME25 parity | HumanEval TPF | HumanEval speedup | HumanEval parity |
+|---|---:|---:|---:|---:|---:|---:|
+| FlowDraft (ours, endpoint Flow Map) | 1.761 | 1.493x | 100% | 1.647 | 1.394x | 100% |
+| Orthrus (ours, clean budget-matched reconstruction) | 1.371 | 1.276x | 100% | 1.591 | 1.476x | 100% |
+| Orthrus (released reference checkpoint) | 3.459 | 3.124x | 100% | 4.559 | 4.090x | 100% |
+
+Mean accepted draft length is retained in the raw per-prompt metrics, but it is not a cross-method headline metric. FlowDraft uses a lightweight external drafter, while Orthrus' proposal loop incurs an additional model pass. Thus the same accepted length has a different forward-pass cost; TPF and wall-clock speedup are the comparable quantities.
 
 The released checkpoint is a reference implementation, not a budget-matched training comparison: it was trained by the authors at substantially larger scale. It is evaluated on the same fixed prompts and inference backend as the two local methods.
 
