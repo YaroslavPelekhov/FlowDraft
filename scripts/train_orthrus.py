@@ -4,8 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import signal
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
@@ -16,8 +18,18 @@ from transformers import get_cosine_schedule_with_warmup, set_seed
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from orthrus_training.checkpointing import save_orthrus_checkpoint, save_training_state
-from orthrus_training.data import PackedTokenDataset, make_diffusion_batch, sample_anchor_positions
-from orthrus_training.losses import forward_kl_distillation, gather_logits, token_accuracy
+from orthrus_training.data import (
+    PackedTokenDataset,
+    assert_disjoint_packed_manifests,
+    make_diffusion_batch,
+    sample_anchor_positions,
+)
+from orthrus_training.losses import (
+    forward_kl_distillation,
+    gather_logits,
+    prefix_acceptance_metrics,
+    token_accuracy,
+)
 from orthrus_training.modeling import (
     build_orthrus_from_qwen,
     count_parameters,
@@ -54,6 +66,12 @@ def parse_args():
     parser.add_argument("--eval-every", type=int, default=0)
     parser.add_argument("--eval-batches", type=int, default=8)
     parser.add_argument("--eval-anchor-blocks", type=int, default=8)
+    parser.add_argument(
+        "--best-metric",
+        choices=("eval_loss", "eval_greedy_prefix_acceptance"),
+        default="eval_loss",
+        help="Validation metric used to select the atomic best checkpoint.",
+    )
     parser.add_argument("--save-every", type=int, default=1000)
     parser.add_argument("--save-trainer-state", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=False)
@@ -107,6 +125,7 @@ def evaluate_distillation(
     model.eval()
     losses = []
     accuracies = []
+    prefix_acceptances = []
 
     for batch_idx, batch in enumerate(dataloader):
         if batch_idx >= max_batches:
@@ -140,6 +159,8 @@ def evaluate_distillation(
         student_logits = select_student_logits(diff_outputs.logits, block_size)
         losses.append(float(forward_kl_distillation(student_logits, teacher_logits, temperature=temperature).cpu()))
         accuracies.append(float(token_accuracy(student_logits, target_ids).cpu()))
+        prefix_metrics = prefix_acceptance_metrics(student_logits, target_ids, block_size)
+        prefix_acceptances.append(float(prefix_metrics["greedy_prefix_acceptance"].cpu()))
 
     if was_training:
         model.train()
@@ -147,6 +168,9 @@ def evaluate_distillation(
     return {
         "eval_loss": sum(losses) / len(losses) if losses else float("inf"),
         "eval_top1": sum(accuracies) / len(accuracies) if accuracies else 0.0,
+        "eval_greedy_prefix_acceptance": (
+            sum(prefix_acceptances) / len(prefix_acceptances) if prefix_acceptances else 0.0
+        ),
         "eval_batches": len(losses),
     }
 
@@ -165,6 +189,13 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     tokenizer = load_tokenizer(args.base_model)
+    train_unique = None
+    eval_unique = None
+    if args.eval_manifest:
+        train_unique, eval_unique = assert_disjoint_packed_manifests(
+            args.train_manifest,
+            args.eval_manifest,
+        )
     dataset = PackedTokenDataset(args.train_manifest)
     dataloader = DataLoader(
         dataset,
@@ -223,17 +254,42 @@ def main() -> None:
         "total_params": total_params,
         "trainable_params": trainable_params,
         "trainable_ratio": trainable_ratio,
+        "train_unique_sequences": train_unique,
+        "eval_unique_sequences": eval_unique,
+        "started_at_utc": datetime.now(timezone.utc).isoformat(),
     }
     with (output_dir / "run_config.json").open("w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, sort_keys=True)
+        f.write("\n")
+    with (output_dir / "run_manifest.json").open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "status": "running",
+                "run_config": metadata,
+                "torch": torch.__version__,
+                "gpu": torch.cuda.get_device_name(0),
+            },
+            f,
+            indent=2,
+            sort_keys=True,
+        )
         f.write("\n")
 
     global_step = 0
     running_loss = 0.0
     running_acc = 0.0
-    best_eval_loss = float("inf")
+    best_metric = float("inf") if args.best_metric == "eval_loss" else float("-inf")
     best_step = None
-    best_eval_top1 = None
+    best_values: dict[str, float] = {}
+    stop_requested = False
+
+    def request_stop(signum, _frame) -> None:
+        nonlocal stop_requested
+        stop_requested = True
+        print(f"ORTHRUS_STOP_REQUESTED signal={signum}; finishing the current optimizer step", flush=True)
+
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
     started_at = time.perf_counter()
     metrics_path = output_dir / "train_metrics.jsonl"
     metrics_file = metrics_path.open("a", encoding="utf-8")
@@ -332,27 +388,42 @@ def main() -> None:
                                 "step": global_step,
                                 "epoch": epoch,
                                 "kind": "eval",
-                                "best_eval_loss": best_eval_loss,
+                                "best_metric_name": args.best_metric,
+                                "best_metric": best_metric,
                             }
                         )
                         print(
                             f"eval step={global_step} loss={eval_record['eval_loss']:.5f} "
-                            f"top1={eval_record['eval_top1']:.4f}"
+                            f"top1={eval_record['eval_top1']:.4f} "
+                            f"prefix={eval_record['eval_greedy_prefix_acceptance']:.4f}"
                         )
                         metrics_file.write(json.dumps(eval_record, sort_keys=True) + "\n")
                         metrics_file.flush()
 
-                        if eval_record["eval_loss"] < best_eval_loss:
-                            best_eval_loss = eval_record["eval_loss"]
+                        candidate_metric = eval_record[args.best_metric]
+                        is_better = (
+                            candidate_metric < best_metric
+                            if args.best_metric == "eval_loss"
+                            else candidate_metric > best_metric
+                        )
+                        if is_better:
+                            best_metric = candidate_metric
                             best_step = global_step
-                            best_eval_top1 = eval_record["eval_top1"]
+                            best_values = {
+                                "best_eval_loss": eval_record["eval_loss"],
+                                "best_eval_top1": eval_record["eval_top1"],
+                                "best_eval_greedy_prefix_acceptance": eval_record[
+                                    "eval_greedy_prefix_acceptance"
+                                ],
+                            }
                             save_orthrus_checkpoint(model, tokenizer, output_dir / "best", args.upstream_dir)
                             with (output_dir / "best_metrics.json").open("w", encoding="utf-8") as f:
                                 json.dump(
                                     {
                                         "best_step": best_step,
-                                        "best_eval_loss": best_eval_loss,
-                                        "best_eval_top1": best_eval_top1,
+                                        "best_metric_name": args.best_metric,
+                                        "best_metric": best_metric,
+                                        **best_values,
                                         "checkpoint_written": True,
                                     },
                                     f,
@@ -369,7 +440,9 @@ def main() -> None:
                                 {
                                     "last_step": global_step,
                                     "best_step": best_step,
-                                    "best_eval_loss": best_eval_loss if best_step is not None else None,
+                                    "best_metric_name": args.best_metric,
+                                    "best_metric": best_metric if best_step is not None else None,
+                                    **best_values,
                                 },
                                 f,
                                 indent=2,
@@ -382,10 +455,10 @@ def main() -> None:
                     if global_step >= total_steps:
                         break
 
-                if global_step >= total_steps:
+                if global_step >= total_steps or stop_requested:
                     break
 
-            if global_step >= total_steps:
+            if global_step >= total_steps or stop_requested:
                 break
 
         progress.close()
@@ -395,7 +468,9 @@ def main() -> None:
                 {
                     "last_step": global_step,
                     "best_step": best_step,
-                    "best_eval_loss": best_eval_loss if best_step is not None else None,
+                    "best_metric_name": args.best_metric,
+                    "best_metric": best_metric if best_step is not None else None,
+                    **best_values,
                 },
                 f,
                 indent=2,
@@ -404,6 +479,21 @@ def main() -> None:
             f.write("\n")
         if args.save_trainer_state:
             save_training_state(output_dir / "last", optimizer, scheduler, global_step, args.epochs)
+        with (output_dir / "run_manifest.json").open("w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "status": "interrupted" if stop_requested else "completed",
+                    "best_step": best_step,
+                    "best_metric_name": args.best_metric,
+                    "best_metric": best_metric if best_step is not None else None,
+                    "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "run_config": metadata,
+                },
+                f,
+                indent=2,
+                sort_keys=True,
+            )
+            f.write("\n")
     finally:
         metrics_file.close()
 

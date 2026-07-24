@@ -1,0 +1,30 @@
+# Clean Orthrus baseline with the same data budget and validation protocol as
+# the validated EagleFlow run. The objective remains Orthrus' original AR
+# forward-KL distillation, not the Flow Map objective.
+upstream_dir: upstream_orthrus
+base_model: Qwen/Qwen3-1.7B
+block_size: 32
+mask_token_id: 151669
+num_anchor_blocks: 64
+epochs: 1
+max_steps: 20000
+batch_size: 1
+gradient_accumulation_steps: 1
+learning_rate: 8.0e-5
+warmup_ratio: 0.02
+weight_decay: 0.01
+max_grad_norm: 1.0
+dtype: bf16
+attn_implementation: eager
+temperature: 1.0
+seed: 284
+num_workers: 2
+log_every: 50
+eval_every: 500
+eval_batches: 32
+eval_anchor_blocks: 64
+best_metric: eval_greedy_prefix_acceptance
+save_every: 2000
+save_trainer_state: false
+gradient_checkpointing: false
+compile: false
