@@ -67,6 +67,12 @@ def parse_args():
     parser.add_argument("--eval-batches", type=int, default=8)
     parser.add_argument("--eval-anchor-blocks", type=int, default=8)
     parser.add_argument(
+        "--eval-seed",
+        type=int,
+        default=117,
+        help="Fixed CUDA RNG seed for reproducible validation anchor positions.",
+    )
+    parser.add_argument(
         "--best-metric",
         choices=("eval_loss", "eval_greedy_prefix_acceptance"),
         default="eval_loss",
@@ -120,12 +126,14 @@ def evaluate_distillation(
     num_anchor_blocks: int,
     temperature: float,
     max_batches: int,
+    eval_seed: int,
 ) -> dict[str, float]:
     was_training = model.training
     model.eval()
     losses = []
     accuracies = []
     prefix_acceptances = []
+    eval_generator = torch.Generator(device=device).manual_seed(eval_seed)
 
     for batch_idx, batch in enumerate(dataloader):
         if batch_idx >= max_batches:
@@ -137,6 +145,7 @@ def evaluate_distillation(
             block_size=block_size,
             num_blocks=num_anchor_blocks,
             device=device,
+            generator=eval_generator,
         )
         diffusion_ids, diff_position_ids, causal_limit, teacher_positions, target_ids = make_diffusion_batch(
             input_ids=input_ids,
@@ -382,6 +391,7 @@ def main() -> None:
                             num_anchor_blocks=args.eval_anchor_blocks,
                             temperature=args.temperature,
                             max_batches=args.eval_batches,
+                            eval_seed=args.eval_seed,
                         )
                         eval_record.update(
                             {

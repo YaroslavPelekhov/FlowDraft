@@ -95,11 +95,18 @@ def sample_anchor_positions(
     block_size: int,
     num_blocks: int,
     device: torch.device,
+    generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     if seq_len <= block_size:
         raise ValueError(f"seq_len={seq_len} must be larger than block_size={block_size}")
     max_anchor = seq_len - block_size
-    return torch.randint(0, max_anchor + 1, (batch_size, num_blocks), device=device)
+    return torch.randint(
+        0,
+        max_anchor + 1,
+        (batch_size, num_blocks),
+        device=device,
+        generator=generator,
+    )
 
 
 def make_diffusion_batch(

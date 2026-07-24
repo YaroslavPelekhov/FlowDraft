@@ -4,7 +4,11 @@ import numpy as np
 import pytest
 import torch
 
-from orthrus_training.data import assert_disjoint_packed_manifests, make_diffusion_batch
+from orthrus_training.data import (
+    assert_disjoint_packed_manifests,
+    make_diffusion_batch,
+    sample_anchor_positions,
+)
 
 
 def test_make_diffusion_batch_alignment():
@@ -23,6 +27,27 @@ def test_make_diffusion_batch_alignment():
     assert causal_limit.tolist() == [[1, 1, 1, 1, 9, 9, 9, 9]]
     assert teacher_positions.tolist() == [[2, 3, 4, 10, 11, 12]]
     assert target_ids.tolist() == [[3, 4, 5, 11, 12, 13]]
+
+
+def test_seeded_anchor_positions_are_reproducible():
+    first = sample_anchor_positions(
+        batch_size=2,
+        seq_len=20,
+        block_size=4,
+        num_blocks=3,
+        device=torch.device("cpu"),
+        generator=torch.Generator().manual_seed(4284),
+    )
+    second = sample_anchor_positions(
+        batch_size=2,
+        seq_len=20,
+        block_size=4,
+        num_blocks=3,
+        device=torch.device("cpu"),
+        generator=torch.Generator().manual_seed(4284),
+    )
+
+    assert torch.equal(first, second)
 
 
 def _write_manifest(directory, values):

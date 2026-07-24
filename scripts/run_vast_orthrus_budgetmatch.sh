@@ -10,7 +10,7 @@ log() {
 PYTHON_BIN="${PYTHON_BIN:-/workspace/flowdraft_venv/bin/python}"
 TRAIN_MANIFEST="${TRAIN_MANIFEST:-/workspace/flowdraft_data/nemotron_50k/manifest.json}"
 EVAL_MANIFEST="${EVAL_MANIFEST:-/workspace/flowdraft_data/nemotron_50k_holdout/manifest.json}"
-OUT_DIR="${OUT_DIR:-/dev/shm/flowdraft_runs/orthrus_budgetmatch_20000_r1}"
+OUT_DIR="${OUT_DIR:-/dev/shm/flowdraft_runs/orthrus_budgetmatch_20000_r2}"
 CONFIG_PATH="${CONFIG_PATH:-configs/orthrus_budgetmatch_20000.yaml}"
 PROMPT_DIR="${PROMPT_DIR:-/workspace/flowdraft_runs/eagleflow_parallel_continue_20000_r1/paper_eval}"
 MAX_STEPS="${MAX_STEPS:-20000}"
@@ -50,6 +50,19 @@ log "Training clean Orthrus forward-KL baseline for $MAX_STEPS optimizer updates
   --eval-manifest "$EVAL_MANIFEST" \
   --output-dir "$OUT_DIR" \
   --max-steps "$MAX_STEPS"
+
+run_status="$("$PYTHON_BIN" - "$OUT_DIR/run_manifest.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["status"])
+PY
+)"
+if [ "$run_status" != "completed" ]; then
+  log "Training ended with status=$run_status; skipping benchmark and Hugging Face upload"
+  exit 130
+fi
 
 CHECKPOINT="$OUT_DIR/best"
 if [ ! -f "$CHECKPOINT/config.json" ]; then
