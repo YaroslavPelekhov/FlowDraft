@@ -1,0 +1,10 @@
+{
+  "checkpoint_paths": [
+    "runs/orthrus_budgetmatch_20000_r2/best",
+    "runs/orthrus_budgetmatch_20000_r2/last"
+  ],
+  "repo_id": "Yaroslav574389/FlowDraft-EagleFlow-Qwen3-1.7B",
+  "run_dir": "orthrus_budgetmatch_20000_r2",
+  "run_path": "runs/orthrus_budgetmatch_20000_r2",
+  "uploaded_at_utc": "2026-07-24T05:40:10.959492+00:00"
+}

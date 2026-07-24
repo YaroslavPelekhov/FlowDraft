@@ -1,0 +1,9 @@
+{
+  "best_eval_greedy_prefix_acceptance": 0.32470703125,
+  "best_eval_loss": 10575.492370605469,
+  "best_eval_top1": 0.08296055742539465,
+  "best_metric": 0.32470703125,
+  "best_metric_name": "eval_greedy_prefix_acceptance",
+  "best_step": 1000,
+  "checkpoint_written": true
+}
