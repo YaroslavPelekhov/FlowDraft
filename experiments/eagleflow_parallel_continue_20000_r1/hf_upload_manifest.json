@@ -1,0 +1,10 @@
+{
+  "checkpoint_paths": [
+    "runs/eagleflow_parallel_continue_20000_r1/best",
+    "runs/eagleflow_parallel_continue_20000_r1/last"
+  ],
+  "repo_id": "Yaroslav574389/FlowDraft-EagleFlow-Qwen3-1.7B",
+  "run_dir": "eagleflow_parallel_continue_20000_r1",
+  "run_path": "runs/eagleflow_parallel_continue_20000_r1",
+  "uploaded_at_utc": "2026-07-24T01:50:10.949799+00:00"
+}

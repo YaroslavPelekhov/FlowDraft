@@ -1,0 +1,17 @@
+{
+  "base_flowdraft_adapter_sha256": "e13b0429a7e8f82b67152b63fee64d709001b6de09faae90c2c6bc7994cede3e",
+  "base_flowdraft_checkpoint": "/workspace/flowdraft_runs/flowdraft_v5_prefix_ecld_2000_r3/best",
+  "block_size": 32,
+  "drafter_mode": "parallel",
+  "feedback_mode": "continuous",
+  "format": "eagleflow_endpoint_drafter_v2",
+  "hidden_size": 2048,
+  "inference": "time-zero endpoint flow rollout with one frozen AR verifier pass",
+  "last_step": 20000,
+  "method": "parallel_attention_conditioned_endpoint_flow_map",
+  "num_heads": 12,
+  "num_layers": 3,
+  "objective": "prefix_survival_plus_eagle_feature_token_trajectory_plus_endpoint_flow_consistency",
+  "state_size": 768,
+  "warm_started_from": "/workspace/flowdraft_runs/eagleflow_parallel_refine_3000_r1/best"
+}

@@ -1,0 +1,14 @@
+{
+  "aggregate_speedup": 1.4933069106348176,
+  "aggregate_target_model_tpf": 1.7606602475928472,
+  "base_checkpoint": "/workspace/flowdraft_runs/flowdraft_v5_prefix_ecld_2000_r3/best",
+  "checkpoint": "/workspace/flowdraft_runs/eagleflow_parallel_continue_20000_r1/best",
+  "dtype": "fp32",
+  "method": "EagleFlow attention-conditioned endpoint Flow Map",
+  "num_prompts": 30,
+  "p50_acceptance": 1.0,
+  "parity_rate": 1.0,
+  "total_eagleflow_head_calls": 2151,
+  "total_target_model_forward_passes": 2181,
+  "weighted_acceptance": 0.7763830776383077
+}
